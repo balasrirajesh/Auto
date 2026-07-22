@@ -27,6 +27,14 @@ if (mongoURI) {
     mongoose.connect(mongoURI).then(() => {
         console.log('Connected to MongoDB');
 
+        mongoose.connection.on('error', err => {
+            console.error('MongoDB connection error:', err);
+        });
+
+        mongoose.connection.on('disconnected', () => {
+            console.warn('MongoDB disconnected. Reconnecting...');
+        });
+
         // Set up wwebjs-mongo Store
         const store = new MongoStore({ mongoose: mongoose });
 
@@ -66,21 +74,32 @@ if (mongoURI) {
                 const hasKeyword = JOB_KEYWORDS.some(kw => lowerBody.includes(kw));
 
                 if (hasKeyword) {
-                    // Parse details
-                    const companyRoleMatch = msg.body.match(COMPANY_ROLE_REGEX);
-                    const deadlineMatch = msg.body.match(DEADLINE_REGEX);
-                    const linkMatch = msg.body.match(LINK_REGEX);
+                    try {
+                        // Prevent duplicates: check if exact message content is already stored
+                        const existingJob = await Job.findOne({ content: msg.body });
 
-                    const newJob = new Job({
-                        content: msg.body,
-                        parsedCompany: companyRoleMatch ? companyRoleMatch[1].trim() : 'Unknown',
-                        parsedRole: companyRoleMatch ? companyRoleMatch[2].trim() : 'Unknown',
-                        parsedDeadline: deadlineMatch ? deadlineMatch[1].trim() : 'Unknown',
-                        link: linkMatch ? linkMatch[0] : 'None'
-                    });
+                        if (!existingJob) {
+                            // Parse details
+                            const companyRoleMatch = msg.body.match(COMPANY_ROLE_REGEX);
+                            const deadlineMatch = msg.body.match(DEADLINE_REGEX);
+                            const linkMatch = msg.body.match(LINK_REGEX);
 
-                    await newJob.save();
-                    console.log('New job posting detected and saved as pending.');
+                            const newJob = new Job({
+                                content: msg.body,
+                                parsedCompany: companyRoleMatch ? companyRoleMatch[1].trim() : 'Unknown',
+                                parsedRole: companyRoleMatch ? companyRoleMatch[2].trim() : 'Unknown',
+                                parsedDeadline: deadlineMatch ? deadlineMatch[1].trim() : 'Unknown',
+                                link: linkMatch ? linkMatch[0] : 'None'
+                            });
+
+                            await newJob.save();
+                            console.log('New job posting detected and saved as pending.');
+                        } else {
+                            console.log('Duplicate job posting detected. Skipping.');
+                        }
+                    } catch (error) {
+                        console.error('Error processing message:', error);
+                    }
                 }
             }
         });
