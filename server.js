@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
 const { Client, RemoteAuth } = require('whatsapp-web.js');
@@ -8,11 +9,16 @@ const xlsx = require('xlsx');
 const app = express();
 const port = process.env.PORT || 3000;
 const mongoURI = process.env.MONGODB_URI;
-const targetGroup = process.env.TARGET_GROUP_NAME;
+const targetGroupsEnv = process.env.TARGET_GROUP_NAMES || process.env.TARGET_GROUP_NAME || '';
+const targetGroupList = targetGroupsEnv
+    .split(',')
+    .map(name => name.trim().toLowerCase())
+    .filter(Boolean);
 
 // Mongoose schema for jobs
 const jobSchema = new mongoose.Schema({
     content: String,
+    groupName: String,
     dateDetected: { type: Date, default: Date.now },
     status: { type: String, default: 'pending', enum: ['pending', 'approved', 'rejected'] },
     parsedCompany: String,
@@ -53,6 +59,7 @@ if (mongoURI) {
 
         client.on('ready', () => {
             console.log('WhatsApp client connected.');
+            console.log('Monitoring groups:', targetGroupList.join(', '));
         });
 
         client.on('remote_session_saved', () => {
@@ -66,39 +73,45 @@ if (mongoURI) {
         const LINK_REGEX = /(https?:\/\/[^\s]+)/;
 
         client.on('message', async msg => {
-            if (!targetGroup) return;
+            if (targetGroupList.length === 0) return;
 
             const chat = await msg.getChat();
-            if (chat.isGroup && chat.name === targetGroup) {
-                const lowerBody = msg.body.toLowerCase();
-                const hasKeyword = JOB_KEYWORDS.some(kw => lowerBody.includes(kw));
+            if (chat.isGroup) {
+                const chatNameLower = chat.name.toLowerCase();
+                const isMatchedGroup = targetGroupList.some(target => chatNameLower.includes(target));
 
-                if (hasKeyword) {
-                    try {
-                        // Prevent duplicates: check if exact message content is already stored
-                        const existingJob = await Job.findOne({ content: msg.body });
+                if (isMatchedGroup) {
+                    const lowerBody = msg.body.toLowerCase();
+                    const hasKeyword = JOB_KEYWORDS.some(kw => lowerBody.includes(kw));
 
-                        if (!existingJob) {
-                            // Parse details
-                            const companyRoleMatch = msg.body.match(COMPANY_ROLE_REGEX);
-                            const deadlineMatch = msg.body.match(DEADLINE_REGEX);
-                            const linkMatch = msg.body.match(LINK_REGEX);
+                    if (hasKeyword) {
+                        try {
+                            // Prevent duplicates: check if exact message content is already stored
+                            const existingJob = await Job.findOne({ content: msg.body });
 
-                            const newJob = new Job({
-                                content: msg.body,
-                                parsedCompany: companyRoleMatch ? companyRoleMatch[1].trim() : 'Unknown',
-                                parsedRole: companyRoleMatch ? companyRoleMatch[2].trim() : 'Unknown',
-                                parsedDeadline: deadlineMatch ? deadlineMatch[1].trim() : 'Unknown',
-                                link: linkMatch ? linkMatch[0] : 'None'
-                            });
+                            if (!existingJob) {
+                                // Parse details
+                                const companyRoleMatch = msg.body.match(COMPANY_ROLE_REGEX);
+                                const deadlineMatch = msg.body.match(DEADLINE_REGEX);
+                                const linkMatch = msg.body.match(LINK_REGEX);
 
-                            await newJob.save();
-                            console.log('New job posting detected and saved as pending.');
-                        } else {
-                            console.log('Duplicate job posting detected. Skipping.');
+                                const newJob = new Job({
+                                    content: msg.body,
+                                    groupName: chat.name,
+                                    parsedCompany: companyRoleMatch ? companyRoleMatch[1].trim() : 'Unknown',
+                                    parsedRole: companyRoleMatch ? companyRoleMatch[2].trim() : 'Unknown',
+                                    parsedDeadline: deadlineMatch ? deadlineMatch[1].trim() : 'Unknown',
+                                    link: linkMatch ? linkMatch[0] : 'None'
+                                });
+
+                                await newJob.save();
+                                console.log(`New job posting detected in "${chat.name}" and saved as pending.`);
+                            } else {
+                                console.log('Duplicate job posting detected. Skipping.');
+                            }
+                        } catch (error) {
+                            console.error('Error processing message:', error);
                         }
-                    } catch (error) {
-                        console.error('Error processing message:', error);
                     }
                 }
             }
@@ -167,6 +180,7 @@ app.get('/', async (req, res) => {
             for (const job of pendingJobs) {
                 html += `
                     <div class="job">
+                        <p><strong>Group:</strong> ${escapeHTML(job.groupName || 'Unknown')}</p>
                         <p><strong>Company:</strong> ${escapeHTML(job.parsedCompany)}</p>
                         <p><strong>Role:</strong> ${escapeHTML(job.parsedRole)}</p>
                         <p><strong>Deadline:</strong> ${escapeHTML(job.parsedDeadline)}</p>
@@ -222,6 +236,7 @@ app.get('/download', async (req, res) => {
         }
 
         const data = approvedJobs.map(job => ({
+            'WhatsApp Group': job.groupName || 'Unknown',
             Company: job.parsedCompany,
             Role: job.parsedRole,
             Deadline: job.parsedDeadline,
