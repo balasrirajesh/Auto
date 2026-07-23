@@ -88,11 +88,12 @@ if (mongoURI) {
 
             try {
                 const chat = await msg.getChat();
-                if (chat && chat.isGroup) {
-                    const chatNameLower = chat.name.toLowerCase();
-                    const isMatchedGroup = targetGroupList.some(target => chatNameLower.includes(target));
+                if (chat) {
+                    const chatName = chat.name || chat.formattedTitle || '';
+                    const chatNameLower = chatName.toLowerCase();
+                    const isMatchedChat = targetGroupList.some(target => chatNameLower.includes(target));
 
-                    if (isMatchedGroup) {
+                    if (isMatchedChat) {
                         const lowerBody = msg.body.toLowerCase();
                         const hasKeyword = JOB_KEYWORDS.some(kw => lowerBody.includes(kw));
 
@@ -108,7 +109,7 @@ if (mongoURI) {
 
                                 const newJob = new Job({
                                     content: msg.body,
-                                    groupName: chat.name,
+                                    groupName: chatName,
                                     parsedCompany: companyRoleMatch ? companyRoleMatch[1].trim() : 'Unknown',
                                     parsedRole: companyRoleMatch ? companyRoleMatch[2].trim() : 'Unknown',
                                     parsedDeadline: deadlineMatch ? deadlineMatch[1].trim() : 'Unknown',
@@ -116,7 +117,7 @@ if (mongoURI) {
                                 });
 
                                 await newJob.save();
-                                console.log(`New job posting detected in "${chat.name}" and saved as pending.`);
+                                console.log(`New job posting detected in "${chatName}" and saved as pending.`);
                             } else {
                                 console.log('Duplicate job posting detected. Skipping.');
                             }
