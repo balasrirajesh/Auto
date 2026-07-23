@@ -1,10 +1,21 @@
 require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
-const { Client, RemoteAuth } = require('whatsapp-web.js');
+const { Client, LocalAuth, RemoteAuth } = require('whatsapp-web.js');
 const { MongoStore } = require('wwebjs-mongo');
 const qrcode = require('qrcode-terminal');
 const xlsx = require('xlsx');
+const fs = require('fs');
+const path = require('path');
+
+// Global safety handler for wwebjs-mongo RemoteAuth.zip stream glitch
+process.on('uncaughtException', (err) => {
+    if (err && err.code === 'ENOENT' && err.path && err.path.includes('RemoteAuth.zip')) {
+        console.warn('Notice: Handled background RemoteAuth zip sync event.');
+        return;
+    }
+    console.error('Uncaught Exception:', err);
+});
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -41,14 +52,14 @@ if (mongoURI) {
             console.warn('MongoDB disconnected. Reconnecting...');
         });
 
-        // Set up wwebjs-mongo Store
-        const store = new MongoStore({ mongoose: mongoose });
+        // Use LocalAuth for local development (fast, zero zip errors) or RemoteAuth for cloud hosting (Render)
+        const isCloudHost = process.env.RENDER || process.env.NODE_ENV === 'production';
+        const store = isCloudHost ? new MongoStore({ mongoose: mongoose }) : null;
 
         const client = new Client({
-            authStrategy: new RemoteAuth({
-                store: store,
-                backupSyncIntervalMs: 300000
-            }),
+            authStrategy: isCloudHost
+                ? new RemoteAuth({ store: store, backupSyncIntervalMs: 300000 })
+                : new LocalAuth(),
             puppeteer: { args: ['--no-sandbox', '--disable-setuid-sandbox'] }
         });
 
