@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: whatsapp-job-tracker
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    region: singapore
+    envVars:
+      - key: MONGODB_URI
+        sync: false
+      - key: TARGET_GROUP_NAMES
+        value: "cse2 GPP, GPP Stu Group 2027, IV CSE - (2023-27), 2027 Batch BTECH, CSE G - sitting, IgniteCoder - 2027 - ACOE, nithin, Job tracker"
+      - key: RENDER_URL
+        sync: false
