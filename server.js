@@ -364,7 +364,6 @@ app.get('/', async (req, res) => {
             </html>
         `;
         res.send(html);
-        res.send(html);
     } catch (err) {
         res.status(500).send('Error fetching jobs.');
     }
