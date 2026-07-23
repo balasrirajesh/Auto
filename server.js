@@ -86,17 +86,17 @@ if (mongoURI) {
         client.on('message', async msg => {
             if (targetGroupList.length === 0) return;
 
-            const chat = await msg.getChat();
-            if (chat.isGroup) {
-                const chatNameLower = chat.name.toLowerCase();
-                const isMatchedGroup = targetGroupList.some(target => chatNameLower.includes(target));
+            try {
+                const chat = await msg.getChat();
+                if (chat && chat.isGroup) {
+                    const chatNameLower = chat.name.toLowerCase();
+                    const isMatchedGroup = targetGroupList.some(target => chatNameLower.includes(target));
 
-                if (isMatchedGroup) {
-                    const lowerBody = msg.body.toLowerCase();
-                    const hasKeyword = JOB_KEYWORDS.some(kw => lowerBody.includes(kw));
+                    if (isMatchedGroup) {
+                        const lowerBody = msg.body.toLowerCase();
+                        const hasKeyword = JOB_KEYWORDS.some(kw => lowerBody.includes(kw));
 
-                    if (hasKeyword) {
-                        try {
+                        if (hasKeyword) {
                             // Prevent duplicates: check if exact message content is already stored
                             const existingJob = await Job.findOne({ content: msg.body });
 
@@ -120,11 +120,11 @@ if (mongoURI) {
                             } else {
                                 console.log('Duplicate job posting detected. Skipping.');
                             }
-                        } catch (error) {
-                            console.error('Error processing message:', error);
                         }
                     }
                 }
+            } catch (error) {
+                // Safely catch any WhatsApp Web message retrieval glitch without throwing uncaught errors
             }
         });
 
