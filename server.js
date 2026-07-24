@@ -165,7 +165,8 @@ if (mongoURI) {
                     '--no-first-run',
                     '--no-zygote',
                     '--disable-gpu',
-                    '--disable-blink-features=AutomationControlled'
+                    '--disable-blink-features=AutomationControlled',
+                    '--js-flags=--max-old-space-size=256'
                 ]
             },
             userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
@@ -317,7 +318,7 @@ if (mongoURI) {
 
                         let messages = [];
                         try {
-                            messages = await chat.fetchMessages({ limit: 30 });
+                            messages = await chat.fetchMessages({ limit: 10 });
                             console.log(`[Startup Scan] "${name}" → ${messages.length} recent messages fetched`);
                         } catch (e) {
                             console.warn(`[Startup Scan] Failed to fetch messages from "${name}":`, e.message);
@@ -352,6 +353,8 @@ if (mongoURI) {
                             console.log(`[Startup Scan] ✓ Saved: "${company}" | Role: "${role}" | from "${name}"`);
                         }
                         if (savedCount === 0) console.log(`[Startup Scan] "${name}" → no new jobs found`);
+                        // Throttle 1 second between groups to protect memory
+                        await new Promise(r => setTimeout(r, 1000));
                     }
                     console.log('[Startup Scan] Complete.');
                 } catch (scanErr) {
