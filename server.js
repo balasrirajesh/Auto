@@ -1056,11 +1056,11 @@ app.get('/download', async (req, res) => {
     }
 });
 
-app.listen(port, () => {
+app.listen(port, '0.0.0.0', () => {
     console.log(`Server listening on port ${port}`);
 
     // Self-ping every 10 minutes to prevent Render free-tier from sleeping
-    const renderUrl = process.env.RENDER_URL;
+    const renderUrl = process.env.RENDER_EXTERNAL_URL || process.env.RENDER_URL;
     if (renderUrl) {
         const https = require('https');
         const http = require('http');
