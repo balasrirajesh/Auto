@@ -166,7 +166,12 @@ if (mongoURI) {
                     '--no-zygote',
                     '--disable-gpu',
                     '--disable-blink-features=AutomationControlled',
-                    '--js-flags=--max-old-space-size=256'
+                    '--js-flags=--max-old-space-size=256',
+                    '--single-process',
+                    '--disable-extensions',
+                    '--disable-component-update',
+                    '--mute-audio',
+                    '--no-default-browser-check'
                 ]
             },
             userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
@@ -276,6 +281,10 @@ if (mongoURI) {
             // Wait 3 seconds to ensure WhatsApp Web internal store is ready
             // ─────────────────────────────────────────────────────────────
             setTimeout(async () => {
+                if (isCloudHost) {
+                    console.log('[Startup Scan] Cloud host environment detected: skipping heavy message history scan to preserve RAM. Listening in real-time...');
+                    return;
+                }
                 try {
                     console.log('[Startup Scan] Fetching all chats...');
                     let allChats = [];
