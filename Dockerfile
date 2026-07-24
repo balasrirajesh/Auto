@@ -1,4 +1,4 @@
-FROM node:18-slim
+FROM node:20-slim
 
 # Install latest Chrome dependencies required by Puppeteer on Linux / Render
 RUN apt-get update \
