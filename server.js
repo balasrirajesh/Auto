@@ -121,6 +121,7 @@ if (mongoURI) {
             socketTimeoutMS: 45000
         }).then(() => {
             console.log('✓ Connected to MongoDB Atlas');
+            setupWhatsAppClient();
         }).catch(err => {
             console.error(`MongoDB initial connection error (${err.message}). Retries left: ${retries}`);
             if (retries > 0) {
@@ -136,13 +137,14 @@ if (mongoURI) {
     });
 
     mongoose.connection.on('disconnected', () => {
-        console.warn('MongoDB disconnected. Reconnecting...');
+        console.warn('MongoDB disconnected.');
     });
 
     connectDB();
 
-    // Use LocalAuth for local development (fast, zero zip errors) or RemoteAuth for cloud hosting (Render)
-    const isCloudHost = process.env.RENDER || process.env.NODE_ENV === 'production';
+    function setupWhatsAppClient() {
+        // Use LocalAuth for local development or RemoteAuth for cloud hosting (Render)
+        const isCloudHost = process.env.RENDER || process.env.NODE_ENV === 'production';
         const store = isCloudHost ? new MongoStore({ mongoose: mongoose }) : null;
 
         const client = new Client({
@@ -477,6 +479,7 @@ if (mongoURI) {
         };
         process.once('SIGINT', cleanup);
         process.once('SIGTERM', cleanup);
+    } // end setupWhatsAppClient
 } else {
     console.warn("MONGODB_URI not provided. Skipping MongoDB and WhatsApp client setup.");
 }
