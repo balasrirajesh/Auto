@@ -115,7 +115,7 @@ function isDeadlineExpired(deadlineStr) {
 
 // Connect to MongoDB
 if (mongoURI) {
-    const connectDB = (retries = 5, delay = 3000) => {
+    const connectDB = async (retries = 5, delay = 3000) => {
         mongoose.connect(mongoURI, {
             serverSelectionTimeoutMS: 15000,
             socketTimeoutMS: 45000
@@ -142,7 +142,7 @@ if (mongoURI) {
 
     connectDB();
 
-    function setupWhatsAppClient() {
+    const setupWhatsAppClient = () => {
         // Use LocalAuth for local development or RemoteAuth for cloud hosting (Render)
         const isCloudHost = process.env.RENDER || process.env.NODE_ENV === 'production';
         const store = isCloudHost ? new MongoStore({ mongoose: mongoose }) : null;
@@ -479,7 +479,7 @@ if (mongoURI) {
         };
         process.once('SIGINT', cleanup);
         process.once('SIGTERM', cleanup);
-    } // end setupWhatsAppClient
+    }; // end setupWhatsAppClient
 } else {
     console.warn("MONGODB_URI not provided. Skipping MongoDB and WhatsApp client setup.");
 }
