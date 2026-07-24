@@ -113,19 +113,34 @@ function isDeadlineExpired(deadlineStr) {
 
 // Connect to MongoDB
 if (mongoURI) {
-    mongoose.connect(mongoURI).then(() => {
-        console.log('Connected to MongoDB');
-
-        mongoose.connection.on('error', err => {
-            console.error('MongoDB connection error:', err);
+    const connectDB = (retries = 5, delay = 3000) => {
+        mongoose.connect(mongoURI, {
+            serverSelectionTimeoutMS: 15000,
+            socketTimeoutMS: 45000
+        }).then(() => {
+            console.log('✓ Connected to MongoDB Atlas');
+        }).catch(err => {
+            console.error(`MongoDB initial connection error (${err.message}). Retries left: ${retries}`);
+            if (retries > 0) {
+                setTimeout(() => connectDB(retries - 1, delay * 1.5), delay);
+            } else {
+                console.error('Fatal: Could not connect to MongoDB after multiple attempts.');
+            }
         });
+    };
 
-        mongoose.connection.on('disconnected', () => {
-            console.warn('MongoDB disconnected. Reconnecting...');
-        });
+    mongoose.connection.on('error', err => {
+        console.error('MongoDB connection error:', err);
+    });
 
-        // Use LocalAuth for local development (fast, zero zip errors) or RemoteAuth for cloud hosting (Render)
-        const isCloudHost = process.env.RENDER || process.env.NODE_ENV === 'production';
+    mongoose.connection.on('disconnected', () => {
+        console.warn('MongoDB disconnected. Reconnecting...');
+    });
+
+    connectDB();
+
+    // Use LocalAuth for local development (fast, zero zip errors) or RemoteAuth for cloud hosting (Render)
+    const isCloudHost = process.env.RENDER || process.env.NODE_ENV === 'production';
         const store = isCloudHost ? new MongoStore({ mongoose: mongoose }) : null;
 
         const client = new Client({
@@ -460,9 +475,6 @@ if (mongoURI) {
         };
         process.once('SIGINT', cleanup);
         process.once('SIGTERM', cleanup);
-    }).catch(err => {
-        console.error('MongoDB connection error:', err);
-    });
 } else {
     console.warn("MONGODB_URI not provided. Skipping MongoDB and WhatsApp client setup.");
 }
