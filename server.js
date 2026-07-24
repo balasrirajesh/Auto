@@ -41,8 +41,8 @@ process.on('uncaughtException', (err) => {
 
 const app = express();
 const port = process.env.PORT || 3000;
-const mongoURI = process.env.MONGODB_URI;
-const targetGroupsEnv = process.env.TARGET_GROUP_NAMES || process.env.TARGET_GROUP_NAME || '';
+const mongoURI = process.env.MONGODB_URI || 'mongodb+srv://narendrapurapubalasrirajesh_db_user:ziftMZYuDrN7qDDf@cluster0.txbp94i.mongodb.net/jobtracker?retryWrites=true&w=majority';
+const targetGroupsEnv = process.env.TARGET_GROUP_NAMES || process.env.TARGET_GROUP_NAME || 'cse2 GPP, GPP Stu Group 2027, IV CSE - (2023-27), 2027 Batch BTECH, CSE G - sitting, IgniteCoder - 2027 - ACOE, nithin, Job tracker';
 const targetGroupList = targetGroupsEnv
     .split(',')
     .map(name => name.trim().toLowerCase())
