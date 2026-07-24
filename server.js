@@ -468,8 +468,19 @@ if (mongoURI) {
         // Single event listener for all messages (prevents double execution)
         client.on('message_create', handleMessage);
 
-
         client.initialize();
+
+        // WhatsApp Web keep-alive heartbeat every 5 minutes to keep WebSocket active
+        setInterval(async () => {
+            try {
+                if (client && isWhatsAppConnected) {
+                    const state = await client.getState();
+                    console.log(`[WhatsApp Keep-Alive] Client connection state: ${state || 'CONNECTED'}`);
+                }
+            } catch (e) {
+                console.warn('[WhatsApp Keep-Alive] State check warning:', e.message);
+            }
+        }, 5 * 60 * 1000);
 
         const cleanup = async () => {
             try {
@@ -1059,7 +1070,7 @@ app.get('/download', async (req, res) => {
 app.listen(port, '0.0.0.0', () => {
     console.log(`Server listening on port ${port}`);
 
-    // Self-ping every 10 minutes to prevent Render free-tier from sleeping
+    // Self-ping every 5 minutes to prevent Render free-tier from sleeping (15 min sleep limit)
     const renderUrl = process.env.RENDER_EXTERNAL_URL || process.env.RENDER_URL;
     if (renderUrl) {
         const https = require('https');
@@ -1072,7 +1083,7 @@ app.listen(port, '0.0.0.0', () => {
                 console.warn('[Keep-Alive] Self-ping failed:', err.message);
             });
         };
-        setInterval(selfPing, 10 * 60 * 1000); // Every 10 minutes
-        console.log(`[Keep-Alive] Render sleep prevention active → pinging ${renderUrl}/ping every 10 min`);
+        setInterval(selfPing, 5 * 60 * 1000); // Every 5 minutes
+        console.log(`[Keep-Alive] Render sleep prevention active → pinging ${renderUrl}/ping every 5 min`);
     }
 });
