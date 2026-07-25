@@ -142,14 +142,41 @@ if (mongoURI) {
 
     connectDB();
 
+    function cleanWwebjsCache() {
+        try {
+            const authDir = path.join(__dirname, '.wwebjs_auth');
+            if (!fs.existsSync(authDir)) return;
+            const cleanSubDirs = ['Cache', 'Code Cache', 'GPUCache', 'Service Worker', 'Crashpad', 'blob_storage'];
+            const walkAndClean = (dirPath) => {
+                if (!fs.existsSync(dirPath)) return;
+                const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+                for (const entry of entries) {
+                    const fullPath = path.join(dirPath, entry.name);
+                    if (entry.isDirectory()) {
+                        if (cleanSubDirs.includes(entry.name)) {
+                            try { fs.rmSync(fullPath, { recursive: true, force: true }); } catch (e) {}
+                        } else {
+                            walkAndClean(fullPath);
+                        }
+                    } else if (entry.name.endsWith('.log') || entry.name.includes('Singleton') || entry.name.includes('lock')) {
+                        try { fs.unlinkSync(fullPath); } catch (e) {}
+                    }
+                }
+            };
+            walkAndClean(authDir);
+        } catch (e) {}
+    }
+
     const setupWhatsAppClient = () => {
         // Use LocalAuth for local development or RemoteAuth for cloud hosting (Render)
         const isCloudHost = process.env.RENDER || process.env.NODE_ENV === 'production';
         const store = isCloudHost ? new MongoStore({ mongoose: mongoose }) : null;
 
+        cleanWwebjsCache();
+
         const client = new Client({
             authStrategy: isCloudHost
-                ? new RemoteAuth({ store: store, backupSyncIntervalMs: 300000 })
+                ? new RemoteAuth({ store: store, backupSyncIntervalMs: 3600000 })
                 : new LocalAuth(),
             webVersionCache: {
                 type: 'remote',
@@ -165,10 +192,16 @@ if (mongoURI) {
                     '--no-first-run',
                     '--no-zygote',
                     '--disable-gpu',
-                    '--disable-blink-features=AutomationControlled',
-                    '--js-flags=--max-old-space-size=256',
-                    '--single-process',
+                    '--disable-software-rasterizer',
+                    '--renderer-process-limit=1',
+                    '--blink-settings=imagesEnabled=false',
+                    '--disable-background-networking',
+                    '--disable-default-apps',
                     '--disable-extensions',
+                    '--disable-sync',
+                    '--disable-translate',
+                    '--disable-blink-features=AutomationControlled',
+                    '--js-flags=--max-old-space-size=150',
                     '--disable-component-update',
                     '--mute-audio',
                     '--no-default-browser-check'

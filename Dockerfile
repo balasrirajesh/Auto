@@ -22,6 +22,7 @@ ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome-stable
 ENV PORT=3000
 ENV NODE_ENV=production
 ENV RENDER=true
+ENV NODE_OPTIONS="--max-old-space-size=256 --expose-gc"
 
 EXPOSE 3000
 CMD ["npm", "start"]
