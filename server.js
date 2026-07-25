@@ -176,7 +176,7 @@ if (mongoURI) {
 
         const client = new Client({
             authStrategy: isCloudHost
-                ? new RemoteAuth({ store: store, backupSyncIntervalMs: 3600000 })
+                ? new RemoteAuth({ store: store, backupSyncIntervalMs: 86400000 })
                 : new LocalAuth(),
             webVersionCache: {
                 type: 'remote',
@@ -195,6 +195,10 @@ if (mongoURI) {
                     '--disable-software-rasterizer',
                     '--renderer-process-limit=1',
                     '--blink-settings=imagesEnabled=false',
+                    '--disk-cache-size=1',
+                    '--media-cache-size=1',
+                    '--disable-application-cache',
+                    '--disable-offline-load-stale-cache',
                     '--disable-background-networking',
                     '--disable-default-apps',
                     '--disable-extensions',
@@ -218,6 +222,8 @@ if (mongoURI) {
         client.on('authenticated', () => {
             isWhatsAppConnected = true;
             console.log('✓ WhatsApp authenticated successfully! Saved session loaded.');
+            cleanWwebjsCache();
+            if (global.gc) { try { global.gc(); } catch (e) {} }
         });
 
         client.on('auth_failure', (msg) => {
@@ -407,6 +413,8 @@ if (mongoURI) {
 
         client.on('remote_session_saved', () => {
             console.log('WhatsApp session saved to MongoDB.');
+            cleanWwebjsCache();
+            if (global.gc) { try { global.gc(); } catch (e) {} }
         });
 
         // Set to store message IDs currently being processed to prevent duplicate processing
