@@ -3,3 +3,4 @@ node_modules
 *.xlsx
 .wwebjs_auth/
 .wwebjs_cache/
+baileys_auth/

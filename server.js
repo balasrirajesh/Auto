@@ -1,44 +1,30 @@
-// Polyfill Web Crypto API for Node 18 (required by MongoDB driver)
+// Polyfill Web Crypto API for Node 18 (required by MongoDB driver / Baileys)
 if (!globalThis.crypto) { globalThis.crypto = require('crypto').webcrypto; }
 require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
-const { Client, LocalAuth, RemoteAuth } = require('whatsapp-web.js');
-const { MongoStore } = require('wwebjs-mongo');
 const qrcode = require('qrcode-terminal');
 const xlsx = require('xlsx');
 const fs = require('fs');
 const path = require('path');
+const pino = require('pino');
+const { Boom } = require('@hapi/boom');
+const {
+    default: makeWASocket,
+    DisconnectReason,
+    fetchLatestWaWebVersion,
+    useMultiFileAuthState,
+    proto,
+    initAuthCreds,
+    BufferJSON
+} = require('@whiskeysockets/baileys');
 
-// Global safety handler for background Puppeteer, RemoteAuth, and EBUSY lockfile glitches
+// Global process error safety
 process.on('uncaughtException', (err) => {
-    if (err && err.code === 'ENOENT' && err.path && err.path.includes('RemoteAuth.zip')) {
-        console.warn('Notice: Handled background RemoteAuth zip sync event.');
-        return;
-    }
-    if (err && (err.code === 'EBUSY' || (err.message && err.message.includes('EBUSY')))) {
-        console.warn('Notice: Handled background session lockfile (EBUSY) event.');
-        return;
-    }
-    if (err && (err.name === 'ProtocolError' || (err.message && (err.message.includes('Execution context was destroyed') || err.message.includes('Target closed'))))) {
-        console.warn('Notice: Handled background Puppeteer page reload event.');
-        return;
-    }
-    if (err && err.message && err.message.includes('The browser is already running')) {
-        console.warn('Notice: Handled background Chrome lock event.');
-        try {
-            const lockDir = path.join(__dirname, '.wwebjs_auth');
-            if (fs.existsSync(lockDir)) {
-                fs.readdirSync(lockDir, { recursive: true }).forEach(file => {
-                    if (file.includes('lock') || file.includes('Singleton')) {
-                        try { fs.unlinkSync(path.join(lockDir, file)); } catch (e) {}
-                    }
-                });
-            }
-        } catch (e) {}
-        return;
-    }
-    console.error('Uncaught Exception:', err);
+    console.error('Uncaught Exception:', err?.message || err);
+});
+process.on('unhandledRejection', (reason) => {
+    console.error('Unhandled Rejection:', reason?.message || reason);
 });
 
 const app = express();
@@ -63,19 +49,100 @@ const jobSchema = new mongoose.Schema({
 });
 const Job = mongoose.model('Job', jobSchema);
 
-// Global status state for WhatsApp connection
-let isWhatsAppConnected = false;
+// Mongoose schema for Baileys Auth Store
+const baileysAuthSchema = new mongoose.Schema({
+    _id: String,
+    data: String
+}, { timestamps: true });
+const BaileysAuth = mongoose.model('BaileysAuth', baileysAuthSchema);
 
-// Helper functions for deadline cleaning and expiration checking
+// Global state variables
+let isWhatsAppConnected = false;
+let sock = null;
+const groupCache = new Map();
+const processingMsgIds = new Set();
+
+// Helper function: Baileys MongoDB Auth State
+async function useMongoAuthState() {
+    const writeData = async (id, value) => {
+        try {
+            if (value === null || value === undefined) {
+                await BaileysAuth.findByIdAndDelete(id);
+            } else {
+                const dataStr = JSON.stringify(value, BufferJSON.replacer);
+                await BaileysAuth.findByIdAndUpdate(id, { data: dataStr }, { upsert: true });
+            }
+        } catch (e) {
+            console.error(`[Mongo Auth] Error writing ${id}:`, e.message);
+        }
+    };
+
+    const readData = async (id) => {
+        try {
+            const doc = await BaileysAuth.findById(id);
+            if (doc && doc.data) {
+                return JSON.parse(doc.data, BufferJSON.reviver);
+            }
+        } catch (e) {
+            console.error(`[Mongo Auth] Error reading ${id}:`, e.message);
+        }
+        return null;
+    };
+
+    const removeData = async (id) => {
+        try {
+            await BaileysAuth.findByIdAndDelete(id);
+        } catch (e) {}
+    };
+
+    const creds = (await readData('creds')) || initAuthCreds();
+
+    return {
+        state: {
+            creds,
+            keys: {
+                get: async (type, ids) => {
+                    const data = {};
+                    await Promise.all(
+                        ids.map(async (id) => {
+                            let value = await readData(`${type}-${id}`);
+                            if (type === 'app-state-sync-key' && value) {
+                                value = proto.Message.AppStateSyncKeyData.fromObject(value);
+                            }
+                            data[id] = value;
+                        })
+                    );
+                    return data;
+                },
+                set: async (data) => {
+                    const tasks = [];
+                    for (const category in data) {
+                        for (const id in data[category]) {
+                            const value = data[category][id];
+                            const key = `${category}-${id}`;
+                            if (value) {
+                                tasks.push(writeData(key, value));
+                            } else {
+                                tasks.push(removeData(key));
+                            }
+                        }
+                    }
+                    await Promise.all(tasks);
+                }
+            }
+        },
+        saveCreds: () => writeData('creds', creds)
+    };
+}
+
+// Deadline cleaning & expiration helpers
 function cleanDeadlineDate(raw) {
     if (!raw || raw === 'Not specified') return 'Not specified';
     let clean = raw.replace(/[*_~`]/g, '').trim();
 
-    // Strip sentence continuations after comma, period, or trailing keywords
     clean = clean.replace(/,?\s*(?:after|which|we|late|post|shortlist|without|form|link).*/i, '');
     clean = clean.replace(/\..*/, '');
 
-    // Try extracting standard date patterns if available
     const dateMatch = clean.match(/(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*,?\s*)?\d{1,2}(?:st|nd|rd|th)?\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*(?:\s*,?\s*\d{2,4})?(?:\s*(?:at|by|before|,)?\s*\d{1,2}(?::\d{2})?\s*(?:am|pm|PM|AM)?)?/i)
         || clean.match(/\d{1,2}[./-]\d{1,2}[./-]\d{2,4}/)
         || clean.match(/\d{1,2}(?:st|nd|rd|th)?\s*(?:am|pm|AM|PM|noon|midnight)/i);
@@ -102,7 +169,6 @@ function isDeadlineExpired(deadlineStr) {
         }
 
         if (!isNaN(d.getTime())) {
-            // Set to end of day if time isn't explicitly specified
             if (!/\d{1,2}:\d{2}|\d{1,2}\s*(?:am|pm)/i.test(text)) {
                 d.setHours(23, 59, 59, 999);
             }
@@ -113,6 +179,223 @@ function isDeadlineExpired(deadlineStr) {
     return false;
 }
 
+// Smart Job Parser
+const JOB_KEYWORDS = ['hiring', 'apply', 'job', 'internship', 'role', 'full-time', 'fresher', 'opening', 'opportunity', 'careers', 'stipend', 'drive', 'off campus', 'off-campus', 'ctc', 'lpa', 'registration', 'http://', 'https://'];
+const LINK_REGEX = /(https?:\/\/[^\s]+)/;
+
+function parseJobMessage(text) {
+    const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+
+    function extractField(fieldPatterns) {
+        for (const line of lines) {
+            for (const pattern of fieldPatterns) {
+                const match = line.match(pattern);
+                if (match && match[1] && match[1].trim().length > 1) {
+                    return match[1].trim().replace(/[*_~`]/g, '');
+                }
+            }
+        }
+        return null;
+    }
+
+    const company = extractField([
+        /(?:company\s*name|company|organization|firm|employer)\s*[:\-–]\s*(.+)/i,
+        /^(.+?)\s*(?:is\s+hiring|hiring\s+for|presents|campus\s+hiring)/i,
+    ]) || (() => {
+        const skip = /^(dear|hi|hello|hey|greetings|note|important|fyi|please)/i;
+        const nonGreeting = lines.find(l => !skip.test(l) && l.length > 3);
+        if (nonGreeting) {
+            const inline = nonGreeting.match(/company\s*(?:name)?\s*[:\-–]\s*(.+)/i);
+            if (inline) return inline[1].replace(/[*_~`]/g, '').trim();
+            const parts = nonGreeting.split(/\s*[–\-]\s*/);
+            return (parts[0] || nonGreeting).replace(/[*_~`]/g, '').substring(0, 60).trim();
+        }
+        return 'Unknown';
+    })();
+
+    const role = extractField([
+        /(?:role|position|job\s*title|designation|profile|post)\s*[:\-–]\s*(.+)/i,
+        /(?:hiring\s+for|looking\s+for|opening\s+for)\s*[:\-–]?\s*(.+)/i,
+        /(?:internship|opportunity)\s*[:\-–]\s*(.+)/i,
+    ]) || (() => {
+        for (const line of lines) {
+            const dashMatch = line.match(/^.+\s*[–\-]\s*(.+(?:intern|engineer|developer|analyst|manager|role|opportunity).+)$/i);
+            if (dashMatch) return dashMatch[1].replace(/[*_~`]/g, '').trim();
+        }
+        return 'Not specified';
+    })();
+
+    const rawDeadline = extractField([
+        /(?:apply\s*by|last\s*date|deadline|closes?\s*on|application\s*deadline)\s*[:\-–]?\s*(.+)/i,
+        /(?:last\s*date\s*to\s*apply)\s*[:\-–]?\s*(.+)/i,
+    ]) || 'Not specified';
+
+    const deadline = cleanDeadlineDate(rawDeadline);
+
+    const linkMatch = text.match(LINK_REGEX);
+    const link = linkMatch ? linkMatch[0] : 'None';
+
+    return {
+        company: company ? company.substring(0, 120) : 'Unknown',
+        role: role ? role.substring(0, 120) : 'Not specified',
+        deadline: deadline ? deadline.substring(0, 100) : 'Not specified',
+        link
+    };
+}
+
+// Handle incoming messages from Baileys
+async function handleMessage(msg) {
+    if (!msg || !msg.message) return;
+
+    const msgId = msg.key?.id;
+    if (msgId && processingMsgIds.has(msgId)) return;
+    if (msgId) {
+        processingMsgIds.add(msgId);
+        setTimeout(() => processingMsgIds.delete(msgId), 30000);
+    }
+
+    try {
+        const remoteJid = msg.key?.remoteJid || '';
+        const isGroupChat = remoteJid.endsWith('@g.us');
+
+        const contentText = (
+            msg.message?.conversation ||
+            msg.message?.extendedTextMessage?.text ||
+            msg.message?.imageMessage?.caption ||
+            msg.message?.videoMessage?.caption ||
+            msg.message?.documentWithCaptionMessage?.message?.documentMessage?.caption ||
+            ''
+        ).trim();
+
+        if (!contentText) return;
+
+        // Resolve group name if group chat
+        let chatName = '';
+        if (isGroupChat) {
+            if (groupCache.has(remoteJid)) {
+                chatName = groupCache.get(remoteJid);
+            } else if (sock) {
+                try {
+                    const metadata = await sock.groupMetadata(remoteJid);
+                    chatName = metadata?.subject || '';
+                    if (chatName) groupCache.set(remoteJid, chatName);
+                } catch (err) {}
+            }
+        }
+
+        const chatNameClean = chatName.trim().toLowerCase();
+        const preview = contentText.length > 50 ? contentText.substring(0, 50) + '...' : contentText;
+        console.log(`\n📩 [NEW MSG RECEIVED] Group: "${chatName || (isGroupChat ? 'Group' : 'Direct Chat')}" | JID: ${remoteJid} | Content: "${preview}"`);
+
+        const isWildcard = targetGroupList.includes('*') || targetGroupList.includes('all');
+        const isExplicitTarget = Boolean(chatNameClean) && targetGroupList.some(target => target && target.length > 0 && chatNameClean.includes(target));
+
+        const lowerBody = contentText.toLowerCase();
+        const hasKeyword = JOB_KEYWORDS.some(kw => lowerBody.includes(kw));
+
+        const shouldCapture = isExplicitTarget || isWildcard || (isGroupChat && hasKeyword);
+        console.log(`   ├─ Group Match: ${isExplicitTarget} ("${chatName}") | Keyword Match: ${hasKeyword} | Capture: ${shouldCapture}`);
+
+        if (!shouldCapture) {
+            console.log(`   └─ ⏩ Skipped (does not match target group or job keywords)`);
+            return;
+        }
+
+        const existingJob = await Job.findOne({ content: contentText });
+        if (existingJob) {
+            console.log(`   └─ ⏩ Skipped (already saved in database)`);
+            return;
+        }
+
+        const { company, role, deadline, link } = parseJobMessage(contentText);
+        const newJob = new Job({
+            content: contentText,
+            groupName: chatName || 'WhatsApp Group',
+            parsedCompany: company,
+            parsedRole: role,
+            parsedDeadline: deadline,
+            link: link
+        });
+
+        await newJob.save();
+        notifyClients();
+        console.log(`   └─ ✅ [SAVED TO DATABASE] Company: "${company}" | Role: "${role}"`);
+    } catch (error) {
+        console.error('[MSG ERROR]', error.message);
+    }
+}
+
+// Connect to Baileys WhatsApp Socket
+async function connectToWhatsApp() {
+    try {
+        let state, saveCreds;
+
+        if (mongoose.connection.readyState === 1) {
+            console.log('📱 Initializing Baileys WhatsApp client with MongoDB Auth Store...');
+            const auth = await useMongoAuthState();
+            state = auth.state;
+            saveCreds = auth.saveCreds;
+        } else {
+            console.log('📱 Initializing Baileys WhatsApp client with MultiFile Auth Store...');
+            const auth = await useMultiFileAuthState(path.join(__dirname, 'baileys_auth'));
+            state = auth.state;
+            saveCreds = auth.saveCreds;
+        }
+
+        const { version } = await fetchLatestWaWebVersion().catch(() => ({ version: [2, 3000, 1015901307] }));
+
+        sock = makeWASocket({
+            version,
+            auth: state,
+            printQRInTerminal: false,
+            logger: pino({ level: 'silent' }),
+            browser: ['Ubuntu', 'Chrome', '122.0.0.0'],
+            syncFullHistory: false
+        });
+
+        sock.ev.on('creds.update', saveCreds);
+
+        sock.ev.on('connection.update', (update) => {
+            const { connection, lastDisconnect, qr } = update;
+
+            if (qr) {
+                qrcode.generate(qr, { small: true });
+                console.log('⚡ QR Code generated. Scan it with WhatsApp.');
+            }
+
+            if (connection === 'open') {
+                isWhatsAppConnected = true;
+                console.log('✓ WhatsApp authenticated & connected successfully via Baileys!');
+                console.log('Monitoring groups:', targetGroupList.join(', '));
+            } else if (connection === 'close') {
+                isWhatsAppConnected = false;
+                const statusCode = (lastDisconnect?.error instanceof Boom)
+                    ? lastDisconnect.error.output?.statusCode
+                    : lastDisconnect?.error?.statusCode;
+
+                const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+                console.warn(`WhatsApp connection closed (Status: ${statusCode}). Reconnecting: ${shouldReconnect}`);
+
+                if (shouldReconnect) {
+                    setTimeout(connectToWhatsApp, 5000);
+                } else {
+                    console.error('WhatsApp logged out. Restart application to scan a new QR code.');
+                }
+            }
+        });
+
+        sock.ev.on('messages.upsert', async (m) => {
+            if (m.type !== 'notify') return;
+            for (const msg of m.messages) {
+                await handleMessage(msg);
+            }
+        });
+    } catch (err) {
+        console.error('Error starting Baileys socket:', err.message);
+        setTimeout(connectToWhatsApp, 10000);
+    }
+}
+
 // Connect to MongoDB
 if (mongoURI) {
     const connectDB = async (retries = 5, delay = 3000) => {
@@ -121,13 +404,14 @@ if (mongoURI) {
             socketTimeoutMS: 45000
         }).then(() => {
             console.log('✓ Connected to MongoDB Atlas');
-            setupWhatsAppClient();
+            connectToWhatsApp();
         }).catch(err => {
             console.error(`MongoDB initial connection error (${err.message}). Retries left: ${retries}`);
             if (retries > 0) {
                 setTimeout(() => connectDB(retries - 1, delay * 1.5), delay);
             } else {
-                console.error('Fatal: Could not connect to MongoDB after multiple attempts.');
+                console.error('Fatal: Could not connect to MongoDB after multiple attempts. Starting WhatsApp with local file auth...');
+                connectToWhatsApp();
             }
         });
     };
@@ -141,420 +425,12 @@ if (mongoURI) {
     });
 
     connectDB();
-
-    function cleanWwebjsCache() {
-        try {
-            const authDir = path.join(__dirname, '.wwebjs_auth');
-            if (!fs.existsSync(authDir)) return;
-            const cleanSubDirs = ['Cache', 'Code Cache', 'GPUCache', 'Service Worker', 'Crashpad', 'blob_storage'];
-            const walkAndClean = (dirPath) => {
-                if (!fs.existsSync(dirPath)) return;
-                const entries = fs.readdirSync(dirPath, { withFileTypes: true });
-                for (const entry of entries) {
-                    const fullPath = path.join(dirPath, entry.name);
-                    if (entry.isDirectory()) {
-                        if (cleanSubDirs.includes(entry.name)) {
-                            try { fs.rmSync(fullPath, { recursive: true, force: true }); } catch (e) {}
-                        } else {
-                            walkAndClean(fullPath);
-                        }
-                    } else if (entry.name.endsWith('.log') || entry.name.includes('Singleton') || entry.name.includes('lock')) {
-                        try { fs.unlinkSync(fullPath); } catch (e) {}
-                    }
-                }
-            };
-            walkAndClean(authDir);
-        } catch (e) {}
-    }
-
-    const setupWhatsAppClient = () => {
-        // Use LocalAuth for local development or RemoteAuth for cloud hosting (Render)
-        const isCloudHost = process.env.RENDER || process.env.NODE_ENV === 'production';
-        const store = isCloudHost ? new MongoStore({ mongoose: mongoose }) : null;
-
-        cleanWwebjsCache();
-
-        const client = new Client({
-            authStrategy: isCloudHost
-                ? new RemoteAuth({ store: store, backupSyncIntervalMs: 86400000 })
-                : new LocalAuth(),
-            webVersionCache: {
-                type: 'remote',
-                remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.3000.1014811059-alpha.html',
-            },
-            puppeteer: {
-                executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
-                args: [
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                    '--disable-dev-shm-usage',
-                    '--disable-accelerated-2d-canvas',
-                    '--no-first-run',
-                    '--no-zygote',
-                    '--disable-gpu',
-                    '--disable-software-rasterizer',
-                    '--renderer-process-limit=1',
-                    '--blink-settings=imagesEnabled=false',
-                    '--disk-cache-size=1',
-                    '--media-cache-size=1',
-                    '--disable-application-cache',
-                    '--disable-offline-load-stale-cache',
-                    '--disable-background-networking',
-                    '--disable-default-apps',
-                    '--disable-extensions',
-                    '--disable-sync',
-                    '--disable-translate',
-                    '--disable-blink-features=AutomationControlled',
-                    '--js-flags=--max-old-space-size=150',
-                    '--disable-component-update',
-                    '--mute-audio',
-                    '--no-default-browser-check'
-                ]
-            },
-            userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
-        });
-
-        client.on('qr', (qr) => {
-            qrcode.generate(qr, { small: true });
-            console.log('QR Code generated. Scan it with WhatsApp.');
-        });
-
-        client.on('authenticated', () => {
-            isWhatsAppConnected = true;
-            console.log('✓ WhatsApp authenticated successfully! Saved session loaded.');
-            cleanWwebjsCache();
-            if (global.gc) { try { global.gc(); } catch (e) {} }
-        });
-
-        client.on('auth_failure', (msg) => {
-            isWhatsAppConnected = false;
-            console.error('WhatsApp authentication failed:', msg);
-        });
-
-        client.on('disconnected', (reason) => {
-            isWhatsAppConnected = false;
-            console.warn('WhatsApp client disconnected:', reason);
-        });
-
-        // ─────────────────────────────────────────────────────────────
-        // Smart Parsing: extract labeled fields from WhatsApp job posts
-        // Must be defined BEFORE the ready handler and message handlers
-        // ─────────────────────────────────────────────────────────────
-        const JOB_KEYWORDS = ['hiring', 'apply', 'job', 'internship', 'role', 'full-time', 'fresher', 'opening', 'opportunity', 'careers', 'stipend', 'drive', 'off campus', 'off-campus', 'ctc', 'lpa', 'registration', 'http://', 'https://'];
-        const LINK_REGEX = /(https?:\/\/[^\s]+)/;
-
-        function parseJobMessage(text) {
-            const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
-
-            function extractField(fieldPatterns) {
-                for (const line of lines) {
-                    for (const pattern of fieldPatterns) {
-                        const match = line.match(pattern);
-                        if (match && match[1] && match[1].trim().length > 1) {
-                            return match[1].trim().replace(/[*_~`]/g, '');
-                        }
-                    }
-                }
-                return null;
-            }
-
-            // 1. Company
-            const company = extractField([
-                /(?:company\s*name|company|organization|firm|employer)\s*[:\-–]\s*(.+)/i,
-                /^(.+?)\s*(?:is\s+hiring|hiring\s+for|presents|campus\s+hiring)/i,
-            ]) || (() => {
-                const skip = /^(dear|hi|hello|hey|greetings|note|important|fyi|please)/i;
-                const nonGreeting = lines.find(l => !skip.test(l) && l.length > 3);
-                if (nonGreeting) {
-                    const inline = nonGreeting.match(/company\s*(?:name)?\s*[:\-–]\s*(.+)/i);
-                    if (inline) return inline[1].replace(/[*_~`]/g, '').trim();
-                    const parts = nonGreeting.split(/\s*[–\-]\s*/);
-                    return (parts[0] || nonGreeting).replace(/[*_~`]/g, '').substring(0, 60).trim();
-                }
-                return 'Unknown';
-            })();
-
-            // 2. Role
-            const role = extractField([
-                /(?:role|position|job\s*title|designation|profile|post)\s*[:\-–]\s*(.+)/i,
-                /(?:hiring\s+for|looking\s+for|opening\s+for)\s*[:\-–]?\s*(.+)/i,
-                /(?:internship|opportunity)\s*[:\-–]\s*(.+)/i,
-            ]) || (() => {
-                for (const line of lines) {
-                    const dashMatch = line.match(/^.+\s*[–\-]\s*(.+(?:intern|engineer|developer|analyst|manager|role|opportunity).+)$/i);
-                    if (dashMatch) return dashMatch[1].replace(/[*_~`]/g, '').trim();
-                }
-                return 'Not specified';
-            })();
-
-            // 3. Deadline
-            const rawDeadline = extractField([
-                /(?:apply\s*by|last\s*date|deadline|closes?\s*on|application\s*deadline)\s*[:\-–]?\s*(.+)/i,
-                /(?:last\s*date\s*to\s*apply)\s*[:\-–]?\s*(.+)/i,
-            ]) || 'Not specified';
-
-            const deadline = cleanDeadlineDate(rawDeadline);
-
-            // 4. Link
-            const linkMatch = text.match(LINK_REGEX);
-            const link = linkMatch ? linkMatch[0] : 'None';
-
-            return {
-                company: company ? company.substring(0, 120) : 'Unknown',
-                role: role ? role.substring(0, 120) : 'Not specified',
-                deadline: deadline ? deadline.substring(0, 100) : 'Not specified',
-                link
-            };
-        }
-
-        // Global cache for WhatsApp group names (ID -> Name)
-        const groupCache = new Map();
-
-        client.on('ready', async () => {
-            isWhatsAppConnected = true;
-            console.log('✓ WhatsApp client connected & ready.');
-            console.log('Monitoring groups:', targetGroupList.join(', '));
-
-            // ─────────────────────────────────────────────────────────────
-            // Startup Scan: catch messages that arrived while server was offline
-            // Wait 3 seconds to ensure WhatsApp Web internal store is ready
-            // ─────────────────────────────────────────────────────────────
-            setTimeout(async () => {
-                if (isCloudHost) {
-                    console.log('[Startup Scan] Cloud host environment detected: skipping heavy message history scan to preserve RAM. Listening in real-time...');
-                    return;
-                }
-                try {
-                    console.log('[Startup Scan] Fetching all chats...');
-                    let allChats = [];
-                    for (let retry = 1; retry <= 3; retry++) {
-                        try {
-                            allChats = await client.getChats();
-                            break;
-                        } catch (err) {
-                            if (retry === 3) throw err;
-                            await new Promise(r => setTimeout(r, 2000));
-                        }
-                    }
-                    const isWildcard = targetGroupList.includes('*') || targetGroupList.includes('all');
-                    const matchedGroups = [];
-
-                    for (const chat of allChats) {
-                        if (!chat || !chat.isGroup) continue;
-                        const name = chat.name || chat.formattedTitle || '';
-                        if (chat.id?._serialized && name) {
-                            groupCache.set(chat.id._serialized, name);
-                        }
-
-                        const chatNameClean = name.trim().toLowerCase();
-                        if (!chatNameClean) continue;
-
-                        const isTarget = isWildcard || targetGroupList.some(t => t && t.length > 0 && chatNameClean.includes(t));
-                        if (isTarget) matchedGroups.push(name);
-                    }
-
-                    console.log(`[Startup Scan] Matched ${matchedGroups.length} group(s):`, matchedGroups.join(', ') || 'NONE');
-
-                    for (const chat of allChats) {
-                        if (!chat || !chat.isGroup) continue;
-                        const name = chat.name || chat.formattedTitle || '';
-                        const chatNameClean = name.trim().toLowerCase();
-                        if (!chatNameClean) continue;
-
-                        const isTarget = isWildcard || targetGroupList.some(t => t && t.length > 0 && chatNameClean.includes(t));
-                        if (!isTarget) continue;
-
-                        let messages = [];
-                        try {
-                            messages = await chat.fetchMessages({ limit: 10 });
-                            console.log(`[Startup Scan] "${name}" → ${messages.length} recent messages fetched`);
-                        } catch (e) {
-                            console.warn(`[Startup Scan] Failed to fetch messages from "${name}":`, e.message);
-                            continue;
-                        }
-
-                        let savedCount = 0;
-                        for (const msg of messages) {
-                            if (!msg || msg.isStatus || ['notification', 'gp2', 'e2e_notification', 'protocol', 'ciphertext'].includes(msg.type)) continue;
-                            const contentText = (msg.body || msg.caption || '').trim();
-                            if (!contentText) continue;
-
-                            const lowerBody = contentText.toLowerCase();
-                            const hasKeyword = JOB_KEYWORDS.some(kw => lowerBody.includes(kw));
-                            if (!hasKeyword) continue;
-
-                            const already = await Job.findOne({ content: contentText });
-                            if (already) continue;
-
-                            const { company, role, deadline, link } = parseJobMessage(contentText);
-                            const newJob = new Job({
-                                content: contentText,
-                                groupName: name || 'WhatsApp Group',
-                                parsedCompany: company,
-                                parsedRole: role,
-                                parsedDeadline: deadline,
-                                link: link
-                            });
-                            await newJob.save();
-                            notifyClients();
-                            savedCount++;
-                            console.log(`[Startup Scan] ✓ Saved: "${company}" | Role: "${role}" | from "${name}"`);
-                        }
-                        if (savedCount === 0) console.log(`[Startup Scan] "${name}" → no new jobs found`);
-                        // Throttle 1 second between groups to protect memory
-                        await new Promise(r => setTimeout(r, 1000));
-                    }
-                    console.log('[Startup Scan] Complete.');
-                } catch (scanErr) {
-                    console.error('[Startup Scan] ERROR:', scanErr.message);
-                }
-            }, 3000);
-        });
-
-        client.on('remote_session_saved', () => {
-            console.log('WhatsApp session saved to MongoDB.');
-            cleanWwebjsCache();
-            if (global.gc) { try { global.gc(); } catch (e) {} }
-        });
-
-        // Set to store message IDs currently being processed to prevent duplicate processing
-        const processingMsgIds = new Set();
-
-        // Shared handler for all messages (incoming & outgoing)
-        async function handleMessage(msg) {
-            if (!msg || msg.isStatus || ['notification', 'gp2', 'e2e_notification', 'protocol', 'ciphertext'].includes(msg.type)) {
-                return;
-            }
-
-            const msgId = msg.id?._serialized || msg.id?.id;
-            if (msgId && processingMsgIds.has(msgId)) return;
-            if (msgId) {
-                processingMsgIds.add(msgId);
-                setTimeout(() => processingMsgIds.delete(msgId), 30000); // clear after 30s
-            }
-
-            try {
-                // Determine group ID (either msg.from or msg.to if ends with @g.us)
-                const groupId = (msg.from && msg.from.endsWith('@g.us')) ? msg.from
-                             : (msg.to && msg.to.endsWith('@g.us')) ? msg.to : null;
-
-                let chat = null;
-                if (groupId) {
-                    try {
-                        chat = await msg.getChat();
-                        if (chat && chat.name) groupCache.set(groupId, chat.name);
-                    } catch (e) {
-                        try {
-                            chat = await client.getChatById(groupId);
-                            if (chat && chat.name) groupCache.set(groupId, chat.name);
-                        } catch (err2) {}
-                    }
-                }
-
-                // Resolve chat name from all possible sources
-                let chatName = (chat && (chat.name || chat.formattedTitle || chat.groupMetadata?.subject || chat.subject))
-                    || (groupId ? groupCache.get(groupId) : null)
-                    || msg._data?.chat?.name
-                    || msg._data?.chatName
-                    || msg._data?.info?.subject
-                    || '';
-
-                // If still empty but is a group, attempt to fetch chat by ID directly
-                if (!chatName && groupId) {
-                    try {
-                        const fetchedChat = await client.getChatById(groupId);
-                        if (fetchedChat && fetchedChat.name) {
-                            chatName = fetchedChat.name;
-                            groupCache.set(groupId, chatName);
-                        }
-                    } catch (e) {}
-                }
-
-                const chatNameClean = chatName.trim().toLowerCase();
-                const isGroupChat = Boolean(groupId) || (chat && chat.isGroup);
-                const contentText = (msg.body || msg.caption || '').trim();
-
-                const preview = contentText.length > 50 ? contentText.substring(0, 50) + '...' : contentText;
-                console.log(`\n📩 [NEW MSG RECEIVED] Group: "${chatName || (isGroupChat ? 'Group' : 'Direct Chat')}" | ID: ${groupId || msg.from} | Content: "${preview}"`);
-
-                if (!contentText && !msg.hasMedia) {
-                    console.log(`   └─ ⏩ Skipped (empty content)`);
-                    return;
-                }
-
-                const isWildcard = targetGroupList.includes('*') || targetGroupList.includes('all');
-                // Ensure chatNameClean is non-empty before checking string inclusion
-                const isExplicitTarget = Boolean(chatNameClean) && targetGroupList.some(target => target && target.length > 0 && chatNameClean.includes(target));
-
-                const lowerBody = contentText.toLowerCase();
-                const hasKeyword = JOB_KEYWORDS.some(kw => lowerBody.includes(kw));
-
-                const shouldCapture = isExplicitTarget || isWildcard || (isGroupChat && hasKeyword);
-
-                console.log(`   ├─ Group Match: ${isExplicitTarget} ("${chatName}") | Keyword Match: ${hasKeyword} | Capture: ${shouldCapture}`);
-
-                if (!shouldCapture) {
-                    console.log(`   └─ ⏩ Skipped (does not match target group or job keywords)`);
-                    return;
-                }
-
-                const finalContent = contentText || '[Media Attachment]';
-
-                const existingJob = await Job.findOne({ content: finalContent });
-                if (existingJob) {
-                    console.log(`   └─ ⏩ Skipped (already saved in database)`);
-                    return;
-                }
-
-                const { company, role, deadline, link } = parseJobMessage(finalContent);
-                const newJob = new Job({
-                    content: finalContent,
-                    groupName: chatName || 'WhatsApp Group',
-                    parsedCompany: company,
-                    parsedRole: role,
-                    parsedDeadline: deadline,
-                    link: link
-                });
-
-                await newJob.save();
-                notifyClients();
-                console.log(`   └─ ✅ [SAVED TO DATABASE] Company: "${company}" | Role: "${role}"`);
-            } catch (error) {
-                console.error('[MSG ERROR]', error.message);
-            }
-        }
-
-        // Single event listener for all messages (prevents double execution)
-        client.on('message_create', handleMessage);
-
-        client.initialize();
-
-        // WhatsApp Web keep-alive heartbeat every 5 minutes to keep WebSocket active
-        setInterval(async () => {
-            try {
-                if (client && isWhatsAppConnected) {
-                    const state = await client.getState();
-                    console.log(`[WhatsApp Keep-Alive] Client connection state: ${state || 'CONNECTED'}`);
-                }
-            } catch (e) {
-                console.warn('[WhatsApp Keep-Alive] State check warning:', e.message);
-            }
-        }, 5 * 60 * 1000);
-
-        const cleanup = async () => {
-            try {
-                if (client) await client.destroy();
-            } catch (e) {}
-            process.exit(0);
-        };
-        process.once('SIGINT', cleanup);
-        process.once('SIGTERM', cleanup);
-    }; // end setupWhatsAppClient
 } else {
-    console.warn("MONGODB_URI not provided. Skipping MongoDB and WhatsApp client setup.");
+    console.warn("MONGODB_URI not provided. Starting WhatsApp client with local file auth.");
+    connectToWhatsApp();
 }
 
-// Express routes
+// Express HTTP Server & UI Routes
 app.use(express.urlencoded({ extended: true }));
 
 app.get('/ping', (req, res) => {
@@ -574,7 +450,6 @@ function escapeHTML(str) {
     );
 }
 
-// Express routes and UI for review
 app.get('/', async (req, res) => {
     try {
         if (!mongoURI) {
@@ -993,7 +868,6 @@ app.get('/', async (req, res) => {
                     });
                 }
 
-                // Real-time live updates via Server-Sent Events
                 const evtSource = new EventSource('/updates');
                 evtSource.onmessage = function(e) {
                     if (e.data === 'new_job') {
@@ -1003,7 +877,7 @@ app.get('/', async (req, res) => {
                 evtSource.onerror = function() {
                     setTimeout(() => { evtSource.close(); }, 3000);
                 };
-            <\/script>
+            </script>
             </html>
         `;
         res.send(html);
@@ -1043,7 +917,7 @@ app.post('/delete/:id', async (req, res) => {
     }
 });
 
-// SSE endpoint for real-time live updates
+// SSE endpoint for live UI updates
 const sseClients = [];
 app.get('/updates', (req, res) => {
     res.setHeader('Content-Type', 'text/event-stream');
@@ -1066,8 +940,6 @@ function notifyClients() {
 app.get('/download', async (req, res) => {
     try {
         const approvedJobs = await Job.find({ status: 'approved' }).sort({ dateDetected: -1 }).lean();
-
-        // Exclude all expired jobs automatically from the Excel file
         const activeApprovedJobs = approvedJobs.filter(job => !isDeadlineExpired(job.parsedDeadline));
 
         if (activeApprovedJobs.length === 0) {
@@ -1085,19 +957,16 @@ app.get('/download', async (req, res) => {
         }));
 
         const ws = xlsx.utils.json_to_sheet(data);
-
-        // Set column widths for proper alignment
         ws['!cols'] = [
-            { wch: 24 },   // WhatsApp Group
-            { wch: 28 },   // Company
-            { wch: 32 },   // Role
-            { wch: 20 },   // Deadline
-            { wch: 40 },   // Link
-            { wch: 22 },   // Date Detected
-            { wch: 80 }    // Original Content
+            { wch: 24 },
+            { wch: 28 },
+            { wch: 32 },
+            { wch: 20 },
+            { wch: 40 },
+            { wch: 22 },
+            { wch: 80 }
         ];
 
-        // Apply text wrap and alignment to all cells
         const range = xlsx.utils.decode_range(ws['!ref']);
         for (let R = range.s.r; R <= range.e.r; R++) {
             for (let C = range.s.c; C <= range.e.c; C++) {
@@ -1105,7 +974,6 @@ app.get('/download', async (req, res) => {
                 if (!ws[cellRef]) ws[cellRef] = { t: 's', v: '' };
                 if (!ws[cellRef].s) ws[cellRef].s = {};
                 ws[cellRef].s.alignment = { wrapText: true, vertical: 'top' };
-                // Bold header row
                 if (R === 0) {
                     ws[cellRef].s.font = { bold: true };
                     ws[cellRef].s.fill = { fgColor: { rgb: '1a202c' } };
@@ -1126,10 +994,11 @@ app.get('/download', async (req, res) => {
     }
 });
 
+// Start Express HTTP Server immediately
 app.listen(port, '0.0.0.0', () => {
     console.log(`Server listening on port ${port}`);
 
-    // Self-ping every 5 minutes to prevent Render free-tier from sleeping (15 min sleep limit)
+    // Self-ping keep-alive for Render
     const renderUrl = process.env.RENDER_EXTERNAL_URL || process.env.RENDER_URL;
     if (renderUrl) {
         const https = require('https');
@@ -1142,7 +1011,7 @@ app.listen(port, '0.0.0.0', () => {
                 console.warn('[Keep-Alive] Self-ping failed:', err.message);
             });
         };
-        setInterval(selfPing, 5 * 60 * 1000); // Every 5 minutes
+        setInterval(selfPing, 5 * 60 * 1000);
         console.log(`[Keep-Alive] Render sleep prevention active → pinging ${renderUrl}/ping every 5 min`);
     }
 });
