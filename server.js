@@ -4,6 +4,7 @@ require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
 const qrcode = require('qrcode-terminal');
+const QRCode = require('qrcode');
 const xlsx = require('xlsx');
 const fs = require('fs');
 const path = require('path');
@@ -58,6 +59,7 @@ const BaileysAuth = mongoose.model('BaileysAuth', baileysAuthSchema);
 
 // Global state variables
 let isWhatsAppConnected = false;
+let latestQRCode = null;   // stores raw QR string for /qr page
 let sock = null;
 const groupCache = new Map();
 const processingMsgIds = new Set();
@@ -359,12 +361,14 @@ async function connectToWhatsApp() {
             const { connection, lastDisconnect, qr } = update;
 
             if (qr) {
+                latestQRCode = qr;  // store for /qr web page
                 qrcode.generate(qr, { small: true });
-                console.log('⚡ QR Code generated. Scan it with WhatsApp.');
+                console.log('⚡ QR Code generated. Visit /qr on your deployed URL to scan it.');
             }
 
             if (connection === 'open') {
                 isWhatsAppConnected = true;
+                latestQRCode = null;  // clear QR once connected
                 console.log('✓ WhatsApp authenticated & connected successfully via Baileys!');
                 console.log('Monitoring groups:', targetGroupList.join(', '));
             } else if (connection === 'close') {
@@ -379,7 +383,10 @@ async function connectToWhatsApp() {
                 if (shouldReconnect) {
                     setTimeout(connectToWhatsApp, 5000);
                 } else {
-                    console.error('WhatsApp logged out. Restart application to scan a new QR code.');
+                    latestQRCode = null;
+                    console.error('WhatsApp logged out. Visit /qr on your deployed URL to scan a new QR code.');
+                    // Re-init to show a fresh QR
+                    setTimeout(connectToWhatsApp, 3000);
                 }
             }
         });
@@ -435,6 +442,57 @@ app.use(express.urlencoded({ extended: true }));
 
 app.get('/ping', (req, res) => {
     res.send('pong');
+});
+
+// QR Code page — visit this on your deployed URL to scan WhatsApp
+app.get('/qr', async (req, res) => {
+    if (isWhatsAppConnected) {
+        return res.send(`
+            <!DOCTYPE html><html><head><meta charset="UTF-8">
+            <title>WhatsApp Status</title>
+            <style>body{font-family:sans-serif;background:#0b0f19;color:#10b981;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;flex-direction:column;gap:1rem;}</style>
+            </head><body>
+            <h1>✅ WhatsApp is Connected!</h1>
+            <p style="color:#94a3b8;">No QR code needed — already authenticated.</p>
+            </body></html>
+        `);
+    }
+
+    if (!latestQRCode) {
+        return res.send(`
+            <!DOCTYPE html><html><head><meta charset="UTF-8">
+            <title>WhatsApp QR</title>
+            <meta http-equiv="refresh" content="5">
+            <style>body{font-family:sans-serif;background:#0b0f19;color:#f1f5f9;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;flex-direction:column;gap:1rem;}</style>
+            </head><body>
+            <h1>⏳ Waiting for QR Code...</h1>
+            <p style="color:#94a3b8;">This page refreshes every 5 seconds. Please wait.</p>
+            </body></html>
+        `);
+    }
+
+    try {
+        const qrImageData = await QRCode.toDataURL(latestQRCode, { width: 400, margin: 2 });
+        res.send(`
+            <!DOCTYPE html><html><head><meta charset="UTF-8">
+            <title>Scan WhatsApp QR</title>
+            <meta http-equiv="refresh" content="30">
+            <style>
+                body{font-family:sans-serif;background:#0b0f19;color:#f1f5f9;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;flex-direction:column;gap:1.5rem;padding:2rem;}
+                h1{font-size:1.5rem;margin:0;}
+                p{color:#94a3b8;text-align:center;max-width:400px;}
+                img{border-radius:12px;box-shadow:0 0 40px rgba(16,185,129,0.3);border:4px solid #10b981;}
+            </style>
+            </head><body>
+            <h1>📱 Scan to Connect WhatsApp</h1>
+            <img src="${qrImageData}" alt="WhatsApp QR Code" width="400" height="400" />
+            <p>Open WhatsApp → Linked Devices → Link a Device → Scan this QR.<br>
+               <strong>This page auto-refreshes every 30 seconds with a new QR.</strong></p>
+            </body></html>
+        `);
+    } catch (err) {
+        res.status(500).send('Error generating QR image: ' + err.message);
+    }
 });
 
 function escapeHTML(str) {

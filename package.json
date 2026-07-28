@@ -26,6 +26,7 @@
     "express": "^5.2.1",
     "mongoose": "^9.8.0",
     "pino": "^9.6.0",
+    "qrcode": "^1.5.4",
     "qrcode-terminal": "^0.12.0",
     "xlsx": "^0.18.5"
   }
