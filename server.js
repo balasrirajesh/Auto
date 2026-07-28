@@ -61,8 +61,9 @@ async function sendJobAlert(job) {
             ? `<span style="background:#10b981;color:#022c22;padding:3px 10px;border-radius:20px;font-size:12px;font-weight:700;">${job.parsedDeadline}</span>`
             : `<span style="background:#334155;color:#94a3b8;padding:3px 10px;border-radius:20px;font-size:12px;">Not specified</span>`;
 
-        const linkBtn = job.link && job.link !== 'None'
-            ? `<a href="${job.link}" style="display:inline-block;margin-top:8px;background:linear-gradient(135deg,#3b82f6,#6366f1);color:#fff;padding:10px 22px;border-radius:8px;text-decoration:none;font-weight:700;font-size:14px;">🔗 Apply Now</a>`
+        const jobLinks = (job.links && job.links.length > 0) ? job.links : (job.link && job.link !== 'None' ? [job.link] : []);
+        const linkBtn = jobLinks.length > 0
+            ? jobLinks.map((l, i) => `<a href="${l}" style="display:inline-block;margin-top:8px;margin-right:8px;background:linear-gradient(135deg,#3b82f6,#6366f1);color:#fff;padding:10px 18px;border-radius:8px;text-decoration:none;font-weight:700;font-size:13px;">🔗 ${jobLinks.length > 1 ? `Link ${i + 1}` : 'Apply Now'}</a>`).join('')
             : '';
 
         await emailTransporter.sendMail({
@@ -150,7 +151,8 @@ const jobSchema = new mongoose.Schema({
     parsedCompany: String,
     parsedRole: String,
     parsedDeadline: String,
-    link: String
+    link: String,
+    links: [String]
 });
 const Job = mongoose.model('Job', jobSchema);
 
@@ -307,82 +309,7 @@ const EXCLUDE_ACADEMIC_KEYWORDS = [
 ];
 
 const LINK_REGEX = /(https?:\/\/[^\s]+)/;
-
-function isJobOfferMessage(text) {
-    if (!text || typeof text !== 'string') return false;
-    const trimmed = text.trim();
-    if (trimmed.length < 15) return false;
-
-    // Check if it's purely a document filename without job text (e.g. "exp2pe.txt" or "Syllabus.pdf")
-    const lines = trimmed.split('\n').map(l => l.trim()).filter(Boolean);
-    const isSingleDocFilename = lines.length <= 2 && EXCLUDE_DOC_EXTENSIONS.test(trimmed) && !JOB_KEYWORDS.some(kw => trimmed.toLowerCase().includes(kw));
-    if (isSingleDocFilename) return false;
-
-    const lower = trimmed.toLowerCase();
-
-    // Reject academic files/notes unless accompanied by strong placement/job keywords
-    const hasAcademicExclusion = EXCLUDE_ACADEMIC_KEYWORDS.some(kw => lower.includes(kw));
-    const hasStrongJobKeyword = ['hiring', 'internship', 'campus drive', 'off-campus', 'off campus', 'placement drive', 'job role', 'stipend', 'ctc', 'lpa', 'fresher', 'apply here', 'apply link', 'registration link'].some(kw => lower.includes(kw));
-    
-    if (hasAcademicExclusion && !hasStrongJobKeyword) {
-        return false;
-    }
-
-    // Check for explicit application domain
-    const hasJobDomain = JOB_DOMAINS.some(domain => lower.includes(domain));
-    if (hasJobDomain) return true;
-
-    // Must match at least one job keyword
-    const hasKeyword = JOB_KEYWORDS.some(kw => lower.includes(kw));
-    return hasKeyword;
-}
-
-function normalizeText(str) {
-    if (!str) return '';
-    return str.toLowerCase().replace(/[^a-z0-9]/g, '');
-}
-
-function escapeRegExp(string) {
-    return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-async function isDuplicateJob(contentText, link, company, role) {
-    // 1. Exact match on raw content
-    const exactMatch = await Job.findOne({ content: contentText });
-    if (exactMatch) return true;
-
-    // 2. Exact match on application URL (across single or multiple groups)
-    if (link && link !== 'None' && link.startsWith('http')) {
-        const linkMatch = await Job.findOne({ link: link });
-        if (linkMatch) return true;
-    }
-
-    // 3. Normalized content match (ignores spacing/formatting differences across groups)
-    const normContent = normalizeText(contentText);
-    if (normContent.length > 30) {
-        const recentJobs = await Job.find({}).sort({ dateDetected: -1 }).limit(100);
-        for (const job of recentJobs) {
-            const normExisting = normalizeText(job.content);
-            if (normExisting === normContent) return true;
-            if (normContent.length > 60 && normExisting.length > 60) {
-                if (normExisting.includes(normContent.substring(0, 80)) || normContent.includes(normExisting.substring(0, 80))) {
-                    return true;
-                }
-            }
-        }
-    }
-
-    // 4. Company & Role duplicate match (if company & role are validly parsed)
-    if (company && company !== 'Unknown' && company.length > 2 && role && role !== 'Not specified' && role.length > 2) {
-        const compRoleMatch = await Job.findOne({
-            parsedCompany: { $regex: new RegExp('^' + escapeRegExp(company) + '$', 'i') },
-            parsedRole: { $regex: new RegExp('^' + escapeRegExp(role) + '$', 'i') }
-        });
-        if (compRoleMatch) return true;
-    }
-
-    return false;
-}
+const GLOBAL_LINK_REGEX = /(https?:\/\/[^\s<>"'\)]+)/g;
 
 function parseJobMessage(text) {
     const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
@@ -433,15 +360,107 @@ function parseJobMessage(text) {
 
     const deadline = cleanDeadlineDate(rawDeadline);
 
-    const linkMatch = text.match(LINK_REGEX);
-    const link = linkMatch ? linkMatch[0] : 'None';
+    const rawLinks = text.match(GLOBAL_LINK_REGEX) || [];
+    const links = Array.from(new Set(rawLinks.map(l => l.replace(/[.,;)]+$/, '').trim()))).filter(l => l.length > 8);
+    const link = links.length > 0 ? links[0] : 'None';
 
     return {
         company: company ? company.substring(0, 120) : 'Unknown',
         role: role ? role.substring(0, 120) : 'Not specified',
         deadline: deadline ? deadline.substring(0, 100) : 'Not specified',
-        link
+        link,
+        links: links.length > 0 ? links : (link !== 'None' ? [link] : [])
     };
+}
+
+function isJobOfferMessage(text) {
+    if (!text || typeof text !== 'string') return false;
+    const trimmed = text.trim();
+    if (trimmed.length < 15) return false;
+
+    // Check if it's purely a document filename without job text (e.g. "exp2pe.txt" or "Syllabus.pdf")
+    const lines = trimmed.split('\n').map(l => l.trim()).filter(Boolean);
+    const isSingleDocFilename = lines.length <= 2 && EXCLUDE_DOC_EXTENSIONS.test(trimmed) && !JOB_KEYWORDS.some(kw => trimmed.toLowerCase().includes(kw));
+    if (isSingleDocFilename) return false;
+
+    const lower = trimmed.toLowerCase();
+
+    // Reject academic files/notes unless accompanied by strong placement/job keywords
+    const hasAcademicExclusion = EXCLUDE_ACADEMIC_KEYWORDS.some(kw => lower.includes(kw));
+    const hasStrongJobKeyword = ['hiring', 'internship', 'campus drive', 'off-campus', 'off campus', 'placement drive', 'job role', 'stipend', 'ctc', 'lpa', 'fresher', 'apply here', 'apply link', 'registration link'].some(kw => lower.includes(kw));
+    
+    if (hasAcademicExclusion && !hasStrongJobKeyword) {
+        return false;
+    }
+
+    // Check if message has Company Name + Deadline + Link(s)
+    const { company, deadline, links } = parseJobMessage(text);
+    const hasCompany = company && company !== 'Unknown';
+    const hasDeadline = deadline && deadline !== 'Not specified';
+    const hasLinks = links && links.length > 0;
+
+    // Condition A: Company Name + Deadline + Link(s)
+    if (hasCompany && hasDeadline && hasLinks) {
+        return true;
+    }
+
+    // Condition B: Check for explicit job application domain (forms.gle, unstop, etc.)
+    const hasJobDomain = JOB_DOMAINS.some(domain => lower.includes(domain));
+    if (hasJobDomain) return true;
+
+    // Condition C: General job keywords
+    const hasKeyword = JOB_KEYWORDS.some(kw => lower.includes(kw));
+    return hasKeyword;
+}
+
+function normalizeText(str) {
+    if (!str) return '';
+    return str.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function escapeRegExp(string) {
+    return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+async function isDuplicateJob(contentText, link, company, role, links = []) {
+    // 1. Exact match on raw content
+    const exactMatch = await Job.findOne({ content: contentText });
+    if (exactMatch) return true;
+
+    // 2. Exact match on any of the application URLs (across single or multiple groups)
+    const allLinks = (links && links.length > 0) ? links : (link && link !== 'None' ? [link] : []);
+    for (const l of allLinks) {
+        if (l && l.startsWith('http')) {
+            const linkMatch = await Job.findOne({ $or: [{ link: l }, { links: l }] });
+            if (linkMatch) return true;
+        }
+    }
+
+    // 3. Normalized content match (ignores spacing/formatting differences across groups)
+    const normContent = normalizeText(contentText);
+    if (normContent.length > 30) {
+        const recentJobs = await Job.find({}).sort({ dateDetected: -1 }).limit(100);
+        for (const job of recentJobs) {
+            const normExisting = normalizeText(job.content);
+            if (normExisting === normContent) return true;
+            if (normContent.length > 60 && normExisting.length > 60) {
+                if (normExisting.includes(normContent.substring(0, 80)) || normContent.includes(normExisting.substring(0, 80))) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    // 4. Company & Role duplicate match (if company & role are validly parsed)
+    if (company && company !== 'Unknown' && company.length > 2 && role && role !== 'Not specified' && role.length > 2) {
+        const compRoleMatch = await Job.findOne({
+            parsedCompany: { $regex: new RegExp('^' + escapeRegExp(company) + '$', 'i') },
+            parsedRole: { $regex: new RegExp('^' + escapeRegExp(role) + '$', 'i') }
+        });
+        if (compRoleMatch) return true;
+    }
+
+    return false;
 }
 
 // Handle incoming messages from Baileys
@@ -503,9 +522,9 @@ async function handleMessage(msg) {
             return;
         }
 
-        const { company, role, deadline, link } = parseJobMessage(contentText);
+        const { company, role, deadline, link, links } = parseJobMessage(contentText);
 
-        const duplicate = await isDuplicateJob(contentText, link, company, role);
+        const duplicate = await isDuplicateJob(contentText, link, company, role, links);
         if (duplicate) {
             console.log(`   └─ ⏩ Skipped (duplicate job already captured in single or across multiple groups)`);
             return;
@@ -517,12 +536,13 @@ async function handleMessage(msg) {
             parsedCompany: company,
             parsedRole: role,
             parsedDeadline: deadline,
-            link: link
+            link: link,
+            links: links && links.length > 0 ? links : (link !== 'None' ? [link] : [])
         });
 
         await newJob.save();
         notifyClients();
-        console.log(`   └─ ✅ [SAVED TO DATABASE] Company: "${company}" | Role: "${role}"`);
+        console.log(`   └─ ✅ [SAVED TO DATABASE] Company: "${company}" | Role: "${role}" | Links: ${links.length}`);
 
         // Send email alert
         sendJobAlert(newJob).catch(() => {});
@@ -749,6 +769,11 @@ app.get('/', async (req, res) => {
                 const expired = isDeadlineExpired(job.parsedDeadline);
                 const initials = (job.parsedCompany || 'J').replace(/[^a-zA-Z]/g, '').substring(0, 2).toUpperCase() || 'JB';
                 const hue = (initials.charCodeAt(0) * 47 + (initials.charCodeAt(1) || 0) * 23) % 360;
+                const jobLinks = (job.links && job.links.length > 0) ? job.links : (job.link && job.link !== 'None' ? [job.link] : []);
+                const linksHTML = jobLinks.length > 0
+                    ? jobLinks.map((l, idx) => `<a href="${escapeHTML(l)}" target="_blank" class="apply-link" style="margin-right:8px;">${jobLinks.length > 1 ? `Link ${idx + 1} ↗` : 'Open Link ↗'}</a>`).join('')
+                    : '<span class="text-muted">None</span>';
+
                 pendingHTML += `
                 <div class="job-card" data-expired="${expired}">
                     <div class="card-top">
@@ -770,8 +795,8 @@ app.get('/', async (req, res) => {
                             <span class="meta-value">${escapeHTML(job.parsedDeadline)}</span>
                         </div>
                         <div class="meta-item">
-                            <span class="meta-label">🔗 Link</span>
-                            <span class="meta-value">${job.link !== 'None' ? `<a href="${escapeHTML(job.link)}" target="_blank" class="apply-link">Open Link ↗</a>` : '<span class="text-muted">None</span>'}</span>
+                            <span class="meta-label">🔗 Links (${jobLinks.length})</span>
+                            <span class="meta-value">${linksHTML}</span>
                         </div>
                         <div class="meta-item">
                             <span class="meta-label">🕒 Detected</span>
@@ -813,27 +838,33 @@ app.get('/', async (req, res) => {
                             <th>Role</th>
                             <th>Deadline</th>
                             <th>Group</th>
-                            <th>Link</th>
+                            <th>Links</th>
                             <th>Detected</th>
                             <th>Action</th>
                         </tr>
                     </thead>
                     <tbody>
-                        ${activeApprovedJobs.map((job, i) => `
+                        ${activeApprovedJobs.map((job, i) => {
+                            const jobLinks = (job.links && job.links.length > 0) ? job.links : (job.link && job.link !== 'None' ? [job.link] : []);
+                            const tableLinksHTML = jobLinks.length > 0
+                                ? jobLinks.map((l, idx) => `<a href="${escapeHTML(l)}" target="_blank" class="apply-link" style="margin-right:6px;">${jobLinks.length > 1 ? `Link ${idx + 1} ↗` : 'Apply ↗'}</a>`).join('')
+                                : '<span class="text-muted">—</span>';
+                            return `
                         <tr>
                             <td class="text-muted">${i + 1}</td>
                             <td><strong class="company-cell">${escapeHTML(job.parsedCompany)}</strong></td>
                             <td>${escapeHTML(job.parsedRole)}</td>
                             <td><span class="badge-active">${escapeHTML(job.parsedDeadline)}</span></td>
                             <td><span class="group-tag">${escapeHTML(job.groupName || 'WhatsApp')}</span></td>
-                            <td>${job.link !== 'None' ? `<a href="${escapeHTML(job.link)}" target="_blank" class="apply-link">Apply ↗</a>` : '<span class="text-muted">—</span>'}</td>
+                            <td>${tableLinksHTML}</td>
                             <td class="text-muted small-text">${job.dateDetected ? new Date(job.dateDetected).toLocaleString('en-IN') : ''}</td>
                             <td>
                                 <form method="POST" action="/delete/${job._id}" style="display:inline;" onsubmit="return confirm('Delete this job?');">
                                     <button type="submit" class="btn btn-delete btn-sm">🗑️</button>
                                 </form>
                             </td>
-                        </tr>`).join('')}
+                        </tr>`;
+                        }).join('')}
                     </tbody>
                 </table>
             </div>`;
@@ -1543,15 +1574,18 @@ app.get('/download', async (req, res) => {
             return res.send('No active (non-expired) approved jobs to download.');
         }
 
-        const data = activeApprovedJobs.map(job => ({
-            'WhatsApp Group': job.groupName || 'Unknown',
-            'Company': job.parsedCompany,
-            'Role': job.parsedRole,
-            'Deadline': job.parsedDeadline,
-            'Link': job.link,
-            'Date Detected': job.dateDetected ? new Date(job.dateDetected).toLocaleString('en-IN') : 'Unknown',
-            'Original Content': job.content
-        }));
+        const data = activeApprovedJobs.map(job => {
+            const jobLinks = (job.links && job.links.length > 0) ? job.links.join('\n') : (job.link || 'None');
+            return {
+                'WhatsApp Group': job.groupName || 'Unknown',
+                'Company': job.parsedCompany,
+                'Role': job.parsedRole,
+                'Deadline': job.parsedDeadline,
+                'Links': jobLinks,
+                'Date Detected': job.dateDetected ? new Date(job.dateDetected).toLocaleString('en-IN') : 'Unknown',
+                'Original Content': job.content
+            };
+        });
 
         const ws = xlsx.utils.json_to_sheet(data);
         ws['!cols'] = [
