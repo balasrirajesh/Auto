@@ -39,9 +39,9 @@ const targetGroupList = targetGroupsEnv
     .filter(Boolean);
 
 // ─── Email Notification Config ─────────────────────────────────────────────
-const GMAIL_USER = process.env.GMAIL_USER || '';
-const GMAIL_APP_PASSWORD = process.env.GMAIL_APP_PASSWORD || '';
-const ALERT_EMAIL = process.env.ALERT_EMAIL || 'bsrajeshn@gmail.com';
+const GMAIL_USER = (process.env.GMAIL_USER || '').trim();
+const GMAIL_APP_PASSWORD = (process.env.GMAIL_APP_PASSWORD || '').replace(/\s+/g, '');
+const ALERT_EMAIL = (process.env.ALERT_EMAIL || 'bsrajeshn@gmail.com').trim();
 
 let emailTransporter = null;
 if (GMAIL_USER && GMAIL_APP_PASSWORD) {
@@ -51,7 +51,7 @@ if (GMAIL_USER && GMAIL_APP_PASSWORD) {
     });
     console.log(`✉️  Email alerts enabled → ${ALERT_EMAIL}`);
 } else {
-    console.warn('⚠️  Email alerts disabled. Set GMAIL_USER and GMAIL_APP_PASSWORD in .env');
+    console.warn('⚠️  Email alerts disabled. Set GMAIL_USER and GMAIL_APP_PASSWORD in environment variables.');
 }
 
 async function sendJobAlert(job) {
