@@ -285,9 +285,104 @@ function isDeadlineExpired(deadlineStr) {
     return false;
 }
 
-// Smart Job Parser
-const JOB_KEYWORDS = ['hiring', 'apply', 'job', 'internship', 'role', 'full-time', 'fresher', 'opening', 'opportunity', 'careers', 'stipend', 'drive', 'off campus', 'off-campus', 'ctc', 'lpa', 'registration', 'http://', 'https://'];
+// Smart Job Parser & Intent Validator
+const JOB_KEYWORDS = [
+    'hiring', 'internship', 'intern', 'job', 'role', 'full-time', 'fulltime', 'part-time',
+    'fresher', 'freshers', 'drive', 'campus drive', 'off campus', 'off-campus', 'placement',
+    'stipend', 'ctc', 'lpa', 'careers', 'walk-in', 'walkin', 'opening', 'openings',
+    'registration link', 'apply link', 'job description', 'opportunity', 'salary', 'package'
+];
+
+const JOB_DOMAINS = [
+    'forms.gle', 'docs.google.com/forms', 'unstop.com', 'linkedin.com/jobs', 'naukri.com',
+    'hirist.com', 'lever.co', 'greenhouse.io', 'myworkdayjobs.com', 'foundit.in', 'indeed.com',
+    'careers.', 'jobs.', '/careers', '/apply', '/job/'
+];
+
+const EXCLUDE_DOC_EXTENSIONS = /\.(pdf|txt|docx?|pptx?|xlsx?|zip|rar|png|jpe?g)$/i;
+const EXCLUDE_ACADEMIC_KEYWORDS = [
+    'syllabus', 'syallabus', 'curriculum', 'timetable', 'time table', 'hallticket', 'hall ticket',
+    'mid-1', 'mid-2', 'mid 1', 'mid 2', 'semester exam', 'lab manual', 'assignment', 'question paper',
+    'marksheet', 'attendance'
+];
+
 const LINK_REGEX = /(https?:\/\/[^\s]+)/;
+
+function isJobOfferMessage(text) {
+    if (!text || typeof text !== 'string') return false;
+    const trimmed = text.trim();
+    if (trimmed.length < 15) return false;
+
+    // Check if it's purely a document filename without job text (e.g. "exp2pe.txt" or "Syllabus.pdf")
+    const lines = trimmed.split('\n').map(l => l.trim()).filter(Boolean);
+    const isSingleDocFilename = lines.length <= 2 && EXCLUDE_DOC_EXTENSIONS.test(trimmed) && !JOB_KEYWORDS.some(kw => trimmed.toLowerCase().includes(kw));
+    if (isSingleDocFilename) return false;
+
+    const lower = trimmed.toLowerCase();
+
+    // Reject academic files/notes unless accompanied by strong placement/job keywords
+    const hasAcademicExclusion = EXCLUDE_ACADEMIC_KEYWORDS.some(kw => lower.includes(kw));
+    const hasStrongJobKeyword = ['hiring', 'internship', 'campus drive', 'off-campus', 'off campus', 'placement drive', 'job role', 'stipend', 'ctc', 'lpa', 'fresher', 'apply here', 'apply link', 'registration link'].some(kw => lower.includes(kw));
+    
+    if (hasAcademicExclusion && !hasStrongJobKeyword) {
+        return false;
+    }
+
+    // Check for explicit application domain
+    const hasJobDomain = JOB_DOMAINS.some(domain => lower.includes(domain));
+    if (hasJobDomain) return true;
+
+    // Must match at least one job keyword
+    const hasKeyword = JOB_KEYWORDS.some(kw => lower.includes(kw));
+    return hasKeyword;
+}
+
+function normalizeText(str) {
+    if (!str) return '';
+    return str.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function escapeRegExp(string) {
+    return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+async function isDuplicateJob(contentText, link, company, role) {
+    // 1. Exact match on raw content
+    const exactMatch = await Job.findOne({ content: contentText });
+    if (exactMatch) return true;
+
+    // 2. Exact match on application URL (across single or multiple groups)
+    if (link && link !== 'None' && link.startsWith('http')) {
+        const linkMatch = await Job.findOne({ link: link });
+        if (linkMatch) return true;
+    }
+
+    // 3. Normalized content match (ignores spacing/formatting differences across groups)
+    const normContent = normalizeText(contentText);
+    if (normContent.length > 30) {
+        const recentJobs = await Job.find({}).sort({ dateDetected: -1 }).limit(100);
+        for (const job of recentJobs) {
+            const normExisting = normalizeText(job.content);
+            if (normExisting === normContent) return true;
+            if (normContent.length > 60 && normExisting.length > 60) {
+                if (normExisting.includes(normContent.substring(0, 80)) || normContent.includes(normExisting.substring(0, 80))) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    // 4. Company & Role duplicate match (if company & role are validly parsed)
+    if (company && company !== 'Unknown' && company.length > 2 && role && role !== 'Not specified' && role.length > 2) {
+        const compRoleMatch = await Job.findOne({
+            parsedCompany: { $regex: new RegExp('^' + escapeRegExp(company) + '$', 'i') },
+            parsedRole: { $regex: new RegExp('^' + escapeRegExp(role) + '$', 'i') }
+        });
+        if (compRoleMatch) return true;
+    }
+
+    return false;
+}
 
 function parseJobMessage(text) {
     const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
@@ -393,26 +488,29 @@ async function handleMessage(msg) {
         console.log(`\n📩 [NEW MSG RECEIVED] Group: "${chatName || (isGroupChat ? 'Group' : 'Direct Chat')}" | JID: ${remoteJid} | Content: "${preview}"`);
 
         const isWildcard = targetGroupList.includes('*') || targetGroupList.includes('all');
-        const isExplicitTarget = Boolean(chatNameClean) && targetGroupList.some(target => target && target.length > 0 && chatNameClean.includes(target));
+        const isExplicitTarget = isWildcard || (Boolean(chatNameClean) && targetGroupList.some(target => target && target.length > 0 && chatNameClean.includes(target)));
 
-        const lowerBody = contentText.toLowerCase();
-        const hasKeyword = JOB_KEYWORDS.some(kw => lowerBody.includes(kw));
-
-        const shouldCapture = isExplicitTarget || isWildcard || (isGroupChat && hasKeyword);
-        console.log(`   ├─ Group Match: ${isExplicitTarget} ("${chatName}") | Keyword Match: ${hasKeyword} | Capture: ${shouldCapture}`);
-
-        if (!shouldCapture) {
-            console.log(`   └─ ⏩ Skipped (does not match target group or job keywords)`);
+        if (!isExplicitTarget) {
+            console.log(`   └─ ⏩ Skipped (group "${chatName}" not in monitored target list)`);
             return;
         }
 
-        const existingJob = await Job.findOne({ content: contentText });
-        if (existingJob) {
-            console.log(`   └─ ⏩ Skipped (already saved in database)`);
+        const isJobMsg = isJobOfferMessage(contentText);
+        console.log(`   ├─ Target Group Match: ${isExplicitTarget} ("${chatName}") | Valid Job Intent: ${isJobMsg}`);
+
+        if (!isJobMsg) {
+            console.log(`   └─ ⏩ Skipped (message is not a job/internship/drive announcement)`);
             return;
         }
 
         const { company, role, deadline, link } = parseJobMessage(contentText);
+
+        const duplicate = await isDuplicateJob(contentText, link, company, role);
+        if (duplicate) {
+            console.log(`   └─ ⏩ Skipped (duplicate job already captured in single or across multiple groups)`);
+            return;
+        }
+
         const newJob = new Job({
             content: contentText,
             groupName: chatName || 'WhatsApp Group',
@@ -1228,6 +1326,9 @@ app.get('/', async (req, res) => {
     <header class="topbar">
         <span class="topbar-title">WhatsApp Job Tracker</span>
         <div class="topbar-right">
+            <form method="POST" action="/clean-false-positives" style="display:inline;" onsubmit="return confirm('Purge all non-job / document entries from pending list?');">
+                <button type="submit" class="btn btn-reject btn-sm" style="margin-right:10px;">🧹 Purge Non-Jobs</button>
+            </form>
             <a href="/download" class="dl-btn">📊 Download Excel</a>
         </div>
     </header>
@@ -1392,6 +1493,24 @@ app.post('/delete/:id', async (req, res) => {
         res.redirect('/');
     } catch (err) {
         res.status(500).send('Error deleting job.');
+    }
+});
+
+app.post('/clean-false-positives', async (req, res) => {
+    try {
+        const pendingJobs = await Job.find({ status: 'pending' });
+        let deletedCount = 0;
+        for (const job of pendingJobs) {
+            if (!isJobOfferMessage(job.content)) {
+                await Job.findByIdAndDelete(job._id);
+                deletedCount++;
+            }
+        }
+        notifyClients();
+        console.log(`🧹 Purged ${deletedCount} non-job / document entries from pending.`);
+        res.redirect('/');
+    } catch (err) {
+        res.status(500).send('Error purging false positives: ' + err.message);
     }
 });
 
