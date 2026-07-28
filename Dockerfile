@@ -5,7 +5,7 @@ WORKDIR /usr/src/app
 # Install native dependencies required by Baileys/libsignal
 RUN apt-get update && apt-get install -y \
     libglib2.0-0 \
-    libssl3 \
+    libssl1.1 \
     ca-certificates \
     openssl \
     --no-install-recommends && rm -rf /var/lib/apt/lists/*
