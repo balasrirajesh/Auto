@@ -436,28 +436,27 @@ async function isDuplicateJob(contentText, link, company, role, links = []) {
         }
     }
 
-    // 3. Normalized content match (ignores spacing/formatting differences across groups)
-    const normContent = normalizeText(contentText);
-    if (normContent.length > 30) {
-        const recentJobs = await Job.find({}).sort({ dateDetected: -1 }).limit(100);
-        for (const job of recentJobs) {
-            const normExisting = normalizeText(job.content);
-            if (normExisting === normContent) return true;
-            if (normContent.length > 60 && normExisting.length > 60) {
-                if (normExisting.includes(normContent.substring(0, 80)) || normContent.includes(normExisting.substring(0, 80))) {
-                    return true;
-                }
-            }
-        }
-    }
-
-    // 4. Company & Role duplicate match (if company & role are validly parsed)
+    // 3. Company & Role duplicate match (if company & role are validly parsed)
     if (company && company !== 'Unknown' && company.length > 2 && role && role !== 'Not specified' && role.length > 2) {
         const compRoleMatch = await Job.findOne({
             parsedCompany: { $regex: new RegExp('^' + escapeRegExp(company) + '$', 'i') },
             parsedRole: { $regex: new RegExp('^' + escapeRegExp(role) + '$', 'i') }
         });
         if (compRoleMatch) return true;
+    }
+
+    // 4. Core text similarity match (skip common greetings header)
+    const normContent = normalizeText(contentText);
+    if (normContent.length > 30) {
+        const coreText = normContent.length > 120 ? normContent.substring(30, 130) : normContent;
+        const recentJobs = await Job.find({}).sort({ dateDetected: -1 }).limit(100);
+        for (const job of recentJobs) {
+            const normExisting = normalizeText(job.content);
+            if (normExisting === normContent) return true;
+            if (coreText.length > 40 && normExisting.includes(coreText)) {
+                return true;
+            }
+        }
     }
 
     return false;
@@ -1358,7 +1357,10 @@ app.get('/', async (req, res) => {
         <span class="topbar-title">WhatsApp Job Tracker</span>
         <div class="topbar-right">
             <form method="POST" action="/clean-false-positives" style="display:inline;" onsubmit="return confirm('Purge all non-job / document entries from pending list?');">
-                <button type="submit" class="btn btn-reject btn-sm" style="margin-right:10px;">🧹 Purge Non-Jobs</button>
+                <button type="submit" class="btn btn-reject btn-sm" style="margin-right:8px;">🧹 Purge Non-Jobs</button>
+            </form>
+            <form method="POST" action="/clean-duplicates" style="display:inline;" onsubmit="return confirm('Purge duplicate job entries from pending list?');">
+                <button type="submit" class="btn btn-reject btn-sm" style="margin-right:10px;">👯 Purge Duplicates</button>
             </form>
             <a href="/download" class="dl-btn">📊 Download Excel</a>
         </div>
@@ -1542,6 +1544,74 @@ app.post('/clean-false-positives', async (req, res) => {
         res.redirect('/');
     } catch (err) {
         res.status(500).send('Error purging false positives: ' + err.message);
+    }
+});
+
+app.post('/clean-duplicates', async (req, res) => {
+    try {
+        const pendingJobs = await Job.find({ status: 'pending' }).sort({ dateDetected: 1 });
+        const seenLinks = new Set();
+        const seenNorms = [];
+        const seenCompRoles = new Set();
+        let deletedCount = 0;
+
+        for (const job of pendingJobs) {
+            let isDup = false;
+
+            // Check Links
+            const jobLinks = (job.links && job.links.length > 0) ? job.links : (job.link && job.link !== 'None' ? [job.link] : []);
+            for (const l of jobLinks) {
+                if (l && l.startsWith('http')) {
+                    if (seenLinks.has(l)) {
+                        isDup = true;
+                        break;
+                    }
+                }
+            }
+
+            // Check Company & Role
+            if (!isDup && job.parsedCompany && job.parsedCompany !== 'Unknown' && job.parsedRole && job.parsedRole !== 'Not specified') {
+                const key = `${job.parsedCompany.trim().toLowerCase()}|${job.parsedRole.trim().toLowerCase()}`;
+                if (seenCompRoles.has(key)) {
+                    isDup = true;
+                }
+            }
+
+            // Check Normalized Content
+            if (!isDup && job.content) {
+                const norm = normalizeText(job.content);
+                if (norm.length > 30) {
+                    for (const existingNorm of seenNorms) {
+                        if (existingNorm === norm) {
+                            isDup = true;
+                            break;
+                        }
+                        const core1 = norm.length > 120 ? norm.substring(30, 130) : norm;
+                        if (core1.length > 40 && existingNorm.includes(core1)) {
+                            isDup = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (isDup) {
+                await Job.findByIdAndDelete(job._id);
+                deletedCount++;
+            } else {
+                jobLinks.forEach(l => { if (l && l.startsWith('http')) seenLinks.add(l); });
+                if (job.parsedCompany && job.parsedCompany !== 'Unknown' && job.parsedRole && job.parsedRole !== 'Not specified') {
+                    seenCompRoles.add(`${job.parsedCompany.trim().toLowerCase()}|${job.parsedRole.trim().toLowerCase()}`);
+                }
+                if (job.content) seenNorms.push(normalizeText(job.content));
+            }
+        }
+
+        notifyClients();
+        console.log(`👯 Purged ${deletedCount} duplicate pending jobs.`);
+        res.redirect('/');
+    } catch (err) {
+        res.status(500).send('Error purging duplicates: ' + err.message);
     }
 });
 
