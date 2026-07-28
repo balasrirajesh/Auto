@@ -802,13 +802,19 @@ app.get('/', async (req, res) => {
                             <span class="meta-value">${job.dateDetected ? new Date(job.dateDetected).toLocaleString('en-IN') : ''}</span>
                         </div>
                     </div>
-                    <div class="content-preview">${escapeHTML(job.content)}</div>
+                    <div class="desc-box">
+                        <div class="desc-header">
+                            <span>📜 Full WhatsApp Announcement & Description</span>
+                            <button type="button" class="expand-btn" onclick="toggleExpand(this)">Expand / Collapse ↕</button>
+                        </div>
+                        <div class="desc-content">${escapeHTML(job.content)}</div>
+                    </div>
                     <div class="card-actions">
                         <form method="POST" action="/approve/${job._id}" style="display:inline;">
-                            <button type="submit" class="btn btn-approve">✓ Approve & Add</button>
+                            <button type="submit" class="btn btn-approve">✓ Approve & Add to Tracker</button>
                         </form>
                         <form method="POST" action="/reject/${job._id}" style="display:inline;">
-                            <button type="submit" class="btn btn-reject">✕ Reject</button>
+                            <button type="submit" class="btn btn-reject">✕ Reject Job</button>
                         </form>
                         <form method="POST" action="/delete/${job._id}" style="display:inline;" onsubmit="return confirm('Delete this job entry permanently?');">
                             <button type="submit" class="btn btn-delete">🗑️ Delete</button>
@@ -1182,23 +1188,55 @@ app.get('/', async (req, res) => {
         .apply-link:hover { color: #93c5fd; text-decoration: underline; }
         .text-muted { color: var(--muted); }
 
-        .content-preview {
-            white-space: pre-wrap;
-            background: rgba(0,0,0,0.3);
-            border: 1px solid rgba(255,255,255,0.04);
-            border-radius: 8px;
-            padding: 12px 14px;
-            font-size: 0.83rem;
-            font-family: 'JetBrains Mono', monospace;
-            line-height: 1.65;
-            color: #94a3b8;
-            max-height: 180px;
-            overflow-y: auto;
-            margin-bottom: 16px;
+        .desc-box {
+            background: rgba(13, 19, 34, 0.8);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 10px;
+            margin-bottom: 18px;
+            overflow: hidden;
         }
-        .content-preview::-webkit-scrollbar { width: 4px; }
-        .content-preview::-webkit-scrollbar-track { background: transparent; }
-        .content-preview::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
+        .desc-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 14px;
+            background: rgba(0,0,0,0.35);
+            border-bottom: 1px solid rgba(255,255,255,0.06);
+            font-size: 0.76rem;
+            font-weight: 700;
+            color: #94a3b8;
+            text-transform: uppercase;
+            letter-spacing: 0.6px;
+        }
+        .expand-btn {
+            background: rgba(59,130,246,0.12);
+            border: 1px solid rgba(59,130,246,0.25);
+            color: #60a5fa;
+            padding: 3px 10px;
+            border-radius: 6px;
+            font-size: 0.75rem;
+            font-weight: 700;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .expand-btn:hover { background: rgba(59,130,246,0.25); color: #93c5fd; }
+        .desc-content {
+            white-space: pre-wrap;
+            padding: 14px 16px;
+            font-size: 0.88rem;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            line-height: 1.65;
+            color: #cbd5e1;
+            max-height: 260px;
+            overflow-y: auto;
+            transition: max-height 0.3s ease;
+        }
+        .desc-content.expanded {
+            max-height: none !important;
+        }
+        .desc-content::-webkit-scrollbar { width: 4px; }
+        .desc-content::-webkit-scrollbar-track { background: transparent; }
+        .desc-content::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
 
         .card-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 
@@ -1423,6 +1461,13 @@ app.get('/', async (req, res) => {
 <div id="toast-container"></div>
 
 <script>
+    // Toggle expand/collapse for full description
+    function toggleExpand(btn) {
+        const descContent = btn.parentElement.nextElementSibling;
+        const isExpanded = descContent.classList.toggle('expanded');
+        btn.textContent = isExpanded ? 'Collapse ⬆️' : 'Expand / Collapse ↕';
+    }
+
     // Tab switching
     function switchTab(tab, navItem) {
         document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
